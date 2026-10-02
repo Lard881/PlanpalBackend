@@ -38,3 +38,6 @@ export const adminClient = createClient(
     },
   }
 );
+
+// Alias for consistency
+export const supabaseAdmin = adminClient;

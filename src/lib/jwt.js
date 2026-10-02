@@ -31,7 +31,7 @@ export async function verifyToken(token) {
  * This is just a placeholder - actual token generation
  * happens through Supabase Auth API
  */
-export function generateToken(userId) {
+export function generateToken(_userId) {
   // This is handled by Supabase Auth
   // Included for compatibility with existing code
   return null;

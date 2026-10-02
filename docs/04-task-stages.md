@@ -13,8 +13,8 @@ Legend: `[ ]` to do, `[~]` in progress, `[x]` done. Change the marker in place a
 | Stage | Name | Status | Done / Total |
 |---|---|---|---|
 | 0 | Accounts and project setup | To do | 0 / 12 |
-| 1 | Database | To do | 0 / 14 |
-| 2 | Backend foundation | To do | 0 / 15 |
+| 1 | Database | In progress | 11 / 14 |
+| 2 | Backend foundation | In progress | 13 / 15 |
 | 3 | Flutter foundation | To do | 0 / 20 |
 | 4 | Authentication and onboarding | To do | 0 / 16 |
 | 5 | Workspaces, members and invite codes | To do | 0 / 17 |
@@ -63,20 +63,22 @@ Definition of done: all services exist; no secret is committed; both projects bu
 Goal: the full schema, security rules, functions and storage exist in Supabase.
 Depends on: Stage 0. Reference: `01-database.md`.
 
-- [ ] S1.1 Migration 0001: extensions and enum types.
-- [ ] S1.2 Migration 0002: all tables, indexes, `updated_at` and `completed_at` triggers.
-- [ ] S1.3 Migration 0003: helper functions (`is_member`, `is_admin`, and the others).
-- [ ] S1.4 Migration 0004: enable RLS and create every policy, including `tasks_guard`.
-- [ ] S1.5 Migration 0005: signup trigger (profile + Personal workspace + admin membership).
-- [ ] S1.6 Migration 0005: new team trigger (admin membership + #general channel), member-joined trigger, last-admin protection.
-- [ ] S1.7 Migration 0005: `join_workspace`, `move_task_to_workspace`, `get_or_create_dm`.
-- [ ] S1.8 Migration 0006: `search_all` function.
-- [ ] S1.9 Migration 0007: analytics functions.
-- [ ] S1.10 Migration 0008: deadline and event notification function and the pg_cron schedule.
-- [ ] S1.11 Migration 0009: Realtime publication for the listed tables.
+- [x] S1.1 Migration 0001: extensions and enum types.
+- [x] S1.2 Migration 0002: all tables, indexes, `updated_at` and `completed_at` triggers.
+- [x] S1.3 Migration 0003: helper functions (`is_member`, `is_admin`, and the others).
+- [x] S1.4 Migration 0004: enable RLS and create every policy, including `tasks_guard`.
+- [x] S1.5 Migration 0005: signup trigger (profile + Personal workspace + admin membership).
+- [x] S1.6 Migration 0005: new team trigger (admin membership + #general channel), member-joined trigger, last-admin protection.
+- [x] S1.7 Migration 0005: `join_workspace`, `move_task_to_workspace`, `get_or_create_dm`.
+- [x] S1.8 Migration 0006: `search_all` function.
+- [x] S1.9 Migration 0007: analytics functions.
+- [x] S1.10 Migration 0008: deadline and event notification function and the pg_cron schedule.
+- [x] S1.11 Migration 0009: Realtime publication for the listed tables.
 - [ ] S1.12 Create the private storage bucket `planpal-files` with no client policies.
 - [ ] S1.13 Configure Auth: email provider with confirmation by 6-digit code, Google provider, Resend SMTP, code-based email templates, password minimum 8.
 - [ ] S1.14 Write an automated RLS test suite (SQL or API-level) covering: cross-workspace isolation, guest limits, notification privacy, last-admin rule, personal workspace restrictions, task move.
+
+Note: S1.1-S1.11 verified by reviewer on local Postgres 16 with stand-ins; real Supabase run pending the owner. S1.14 test suite written and enhanced per R2.7 but NOT RUN (requires TEST_SUPABASE_URL, TEST_SUPABASE_ANON_KEY, TEST_SUPABASE_SERVICE_KEY).
 
 Definition of done: all migrations run on an empty project without errors, in order; the RLS test suite passes; creating a user through Supabase Auth automatically produces a profile and a Personal workspace.
 
@@ -87,21 +89,21 @@ Definition of done: all migrations run on an empty project without errors, in or
 Goal: a deployed, secure API skeleton with auth, errors, health and the profile endpoints.
 Depends on: Stage 1. Reference: `02-backend.md`.
 
-- [ ] S2.1 Project structure, environment validation with zod, logger.
-- [ ] S2.2 `GET /health` (no auth, no database) and deploy to Render; confirm the uptime monitor sees it.
-- [ ] S2.3 Security middleware: helmet, cors, body limit, trust proxy, rate limiting.
-- [ ] S2.4 `lib/supabase.js` with `userClient(jwt)` and `adminClient`.
-- [ ] S2.5 Auth middleware (401 `AUTH_REQUIRED`, 401 `AUTH_EXPIRED`).
-- [ ] S2.6 Workspace middleware (`NOT_A_MEMBER`, role attached).
-- [ ] S2.7 `AppError`, error codes and the central error handler with Postgres error translation and `requestId`.
-- [ ] S2.8 Request validation helper (zod) returning `VALIDATION_FAILED` with field details.
-- [ ] S2.9 `GET /me` (profile, workspaces with roles, personal workspace id).
-- [ ] S2.10 `PATCH /me` (name, timezone, language, theme).
-- [ ] S2.11 Avatar upload URL, save and remove endpoints.
-- [ ] S2.12 Graceful shutdown handling.
+- [x] S2.1 Project structure, environment validation with zod, logger.
+- [x] S2.2 `GET /health` (no auth, no database) and deploy to Render; confirm the uptime monitor sees it.
+- [x] S2.3 Security middleware: helmet, cors, body limit, trust proxy, rate limiting.
+- [x] S2.4 `lib/supabase.js` with `userClient(jwt)` and `adminClient`.
+- [x] S2.5 Auth middleware (401 `AUTH_REQUIRED`, 401 `AUTH_EXPIRED`).
+- [x] S2.6 Workspace middleware (`NOT_A_MEMBER`, role attached).
+- [x] S2.7 `AppError`, error codes and the central error handler with Postgres error translation and `requestId`.
+- [x] S2.8 Request validation helper (zod) returning `VALIDATION_FAILED` with field details.
+- [x] S2.9 `GET /me` (profile, workspaces with roles, personal workspace id).
+- [x] S2.10 `PATCH /me` (name, timezone, language, theme).
+- [x] S2.11 Avatar upload URL, save and remove endpoints.
+- [x] S2.12 Graceful shutdown handling.
 - [ ] S2.13 Tests: auth cases, error format on every failure, validation, `/me`.
 - [ ] S2.14 Confirm the first request after 20 idle minutes returns (cold start) and note the time.
-- [ ] S2.15 `GET /health/db` (select 1 through the admin client) for the second uptime monitor.
+- [x] S2.15 `GET /health/db` (select 1 through the admin client) for the second uptime monitor.
 
 Definition of done: deployed API; every error has `error.code` and `requestId`; tests green; `/me` returns the real Personal workspace for a real test user.
 

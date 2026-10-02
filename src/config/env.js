@@ -13,6 +13,7 @@ const envSchema = z.object({
   SUPABASE_JWT_SECRET: z.string().optional(),
   
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
+  CRON_SECRET: z.string().optional(),
   
   ALLOWED_ORIGINS: z.string().default('http://localhost:3000'),
 });
@@ -46,6 +47,10 @@ export const config = {
     serviceAccount: env.FIREBASE_SERVICE_ACCOUNT_JSON
       ? JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON)
       : null,
+  },
+  
+  cron: {
+    secret: env.CRON_SECRET,
   },
   
   cors: {

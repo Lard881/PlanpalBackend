@@ -10,19 +10,6 @@ import { generalLimiter } from './middleware/rateLimit.js';
 // Routes
 import healthRouter from './routes/health.js';
 import meRouter from './routes/me.js';
-import tasksRouter from './routes/tasks.js';
-import labelsRouter from './routes/labels.js';
-import workspacesRouter from './routes/workspaces.js';
-import invitesRouter from './routes/invites.js';
-import commentsRouter from './routes/comments.js';
-import notificationsRouter from './routes/notifications.js';
-import deviceTokensRouter from './routes/device-tokens.js';
-import pushRouter from './routes/push.js';
-import attachmentsRouter from './routes/attachments.js';
-import searchRouter from './routes/search.js';
-import analyticsRouter from './routes/analytics.js';
-import syncRouter from './routes/sync.js';
-import remindersRouter from './routes/reminders.js';
 
 export function createApp() {
   const app = express();
@@ -56,19 +43,6 @@ export function createApp() {
   
   // API endpoints
   apiRouter.use('/me', meRouter);
-  apiRouter.use('/tasks', tasksRouter);
-  apiRouter.use('/labels', labelsRouter);
-  apiRouter.use('/workspaces', workspacesRouter);
-  apiRouter.use('/invites', invitesRouter);
-  apiRouter.use('/comments', commentsRouter);
-  apiRouter.use('/notifications', notificationsRouter);
-  apiRouter.use('/device-tokens', deviceTokensRouter);
-  apiRouter.use('/push', pushRouter);
-  apiRouter.use('/', attachmentsRouter); // Handles /tasks/:id/attachments and /attachments/:id
-  apiRouter.use('/search', searchRouter);
-  apiRouter.use('/analytics', analyticsRouter);
-  apiRouter.use('/sync', syncRouter);
-  apiRouter.use('/reminders', remindersRouter);
   
   app.use('/api/v1', apiRouter);
   
