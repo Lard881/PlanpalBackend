@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { validate } from '../middleware/validate.js';
 import { AppError, ErrorCodes } from '../lib/errors.js';
 import { logger } from '../lib/logger.js';
-import { config } from '../config/env.js';
 
 const router = express.Router();
 
@@ -121,12 +120,11 @@ router.patch('/', validate(updateProfileSchema), async (req, res, next) => {
  */
 const avatarUploadSchema = z.object({
   mimeType: z.string().regex(/^image\/(jpeg|jpg|png|gif|webp)$/),
-  sizeBytes: z.number().max(5 * 1024 * 1024), // 5 MB max
 });
 
 router.post('/avatar-upload-url', validate(avatarUploadSchema), async (req, res, next) => {
   try {
-    const { mimeType, sizeBytes } = req.body;
+    const { mimeType } = req.body;
     const userId = req.user.id;
     
     // Determine file extension

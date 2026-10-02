@@ -296,7 +296,6 @@ if (skipTests) {
       expect(after[0].id).toBe(userBId);
     });
   });
-});
 
   describe('Last Admin Protection', () => {
     test('Last admin cannot be demoted', async () => {

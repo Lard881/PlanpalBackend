@@ -23,8 +23,6 @@ router.get('/', (req, res) => {
  */
 router.get('/db', async (req, res) => {
   try {
-    const { data, error } = await supabaseAdmin.rpc('select', { query: '1' }).single();
-    
     // Alternative: direct SQL query
     const { error: dbError } = await supabaseAdmin
       .from('profiles')

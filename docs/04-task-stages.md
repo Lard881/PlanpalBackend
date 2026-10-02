@@ -78,7 +78,7 @@ Depends on: Stage 0. Reference: `01-database.md`.
 - [ ] S1.13 Configure Auth: email provider with confirmation by 6-digit code, Google provider, Resend SMTP, code-based email templates, password minimum 8.
 - [ ] S1.14 Write an automated RLS test suite (SQL or API-level) covering: cross-workspace isolation, guest limits, notification privacy, last-admin rule, personal workspace restrictions, task move.
 
-Note: S1.1-S1.11 verified by reviewer on local Postgres 16 with stand-ins; real Supabase run pending the owner. S1.14 test suite written and enhanced per R2.7 but NOT RUN (requires TEST_SUPABASE_URL, TEST_SUPABASE_ANON_KEY, TEST_SUPABASE_SERVICE_KEY).
+Note: S1.1-S1.11 verified by reading and consolidation; migrations 0001-0009 plus storage bucket combined into ONE_PASTE_SETUP.sql (safe to run multiple times); real Supabase run pending the owner. RLS test suite written and enhanced per R2.7 with correct skip logic when TEST_ variables not set.
 
 Definition of done: all migrations run on an empty project without errors, in order; the RLS test suite passes; creating a user through Supabase Auth automatically produces a profile and a Personal workspace.
 
