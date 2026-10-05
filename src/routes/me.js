@@ -51,7 +51,7 @@ router.get('/', async (req, res, next) => {
         id: profile.id,
         email: profile.email,
         fullName: profile.full_name,
-        avatarPath: profile.avatar_path,
+        avatarUrl: profile.avatar_url,
         timezone: profile.timezone,
         language: profile.language,
         theme: profile.theme,
@@ -71,7 +71,7 @@ router.get('/', async (req, res, next) => {
  */
 const updateProfileSchema = z.object({
   fullName: z.string().min(1).max(100).optional(),
-  avatarPath: z.string().optional(),
+  avatarUrl: z.string().optional(),
   timezone: z.string().optional(),
   language: z.enum(['en', 'es', 'fr', 'zh', 'ko']).optional(),
   theme: z.enum(['light', 'dark', 'system']).optional(),
@@ -83,7 +83,7 @@ router.patch('/', validate(updateProfileSchema), async (req, res, next) => {
     
     const updates = {};
     if (req.body.fullName !== undefined) updates.full_name = req.body.fullName;
-    if (req.body.avatarPath !== undefined) updates.avatar_path = req.body.avatarPath;
+    if (req.body.avatarUrl !== undefined) updates.avatar_url = req.body.avatarUrl;
     if (req.body.timezone !== undefined) updates.timezone = req.body.timezone;
     if (req.body.language !== undefined) updates.language = req.body.language;
     if (req.body.theme !== undefined) updates.theme = req.body.theme;
@@ -102,7 +102,7 @@ router.patch('/', validate(updateProfileSchema), async (req, res, next) => {
         id: data.id,
         email: data.email,
         fullName: data.full_name,
-        avatarPath: data.avatar_path,
+        avatarUrl: data.avatar_url,
         timezone: data.timezone,
         language: data.language,
         theme: data.theme,
@@ -160,35 +160,131 @@ router.delete('/avatar', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
     
-    // Get current avatar path
+    // Get current avatar url
     const { data: profile, error: fetchError } = await supabase
       .from('profiles')
-      .select('avatar_path')
+      .select('avatar_url')
       .eq('id', req.user.id)
       .single();
     
     if (fetchError) throw fetchError;
     
     // Remove from storage if exists
-    if (profile.avatar_path) {
+    if (profile.avatar_url) {
       const { error: deleteError } = await supabaseAdmin.storage
         .from('planpal-files')
-        .remove([profile.avatar_path]);
+        .remove([profile.avatar_url]);
       
       if (deleteError) {
         logger.warn('Failed to delete avatar from storage', deleteError);
       }
     }
     
-    // Clear avatar_path in profile
+    // Clear avatar_url in profile
     const { error: updateError } = await supabase
       .from('profiles')
-      .update({ avatar_path: null })
+      .update({ avatar_url: null })
       .eq('id', req.user.id);
     
     if (updateError) throw updateError;
     
     res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /me
+ * Delete user account
+ */
+const deleteAccountSchema = z.object({
+  password: z.string().min(1).optional(),
+  confirmDelete: z.literal(true),
+});
+
+router.delete('/', validate(deleteAccountSchema), async (req, res, next) => {
+  try {
+    const supabase = userClient(req.jwt);
+    
+    // Check if user is the only admin of any team with other members
+    const { data: memberships } = await supabase
+      .from('workspace_members')
+      .select('workspace_id, role, workspaces!inner(id, type)')
+      .eq('user_id', req.user.id);
+    
+    for (const membership of memberships || []) {
+      if (membership.role === 'admin' && membership.workspaces.type === 'team') {
+        // Count admins in this workspace
+        const { data: admins } = await supabase
+          .from('workspace_members')
+          .select('user_id')
+          .eq('workspace_id', membership.workspace_id)
+          .eq('role', 'admin');
+        
+        // Count total members
+        const { count: totalMembers } = await supabase
+          .from('workspace_members')
+          .select('*', { count: 'exact', head: true })
+          .eq('workspace_id', membership.workspace_id);
+        
+        if (admins.length === 1 && totalMembers > 1) {
+          throw new AppError(
+            ErrorCodes.TRANSFER_ADMIN_FIRST,
+            'You are the only admin of a team with other members. Transfer admin role before deleting account.',
+            409
+          );
+        }
+      }
+    }
+    
+    // Get personal workspace
+    const personalWorkspace = memberships?.find(m => m.workspaces.type === 'personal');
+    
+    // Soft delete profile
+    await supabase
+      .from('profiles')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', req.user.id);
+    
+    // Remove from team workspaces
+    await supabase
+      .from('workspace_members')
+      .delete()
+      .eq('user_id', req.user.id)
+      .neq('workspace_id', personalWorkspace?.workspace_id);
+    
+    // Delete personal workspace and its files
+    if (personalWorkspace) {
+      // Delete all files in workspace storage
+      const { data: files } = await supabase
+        .from('files')
+        .select('path')
+        .eq('workspace_id', personalWorkspace.workspace_id);
+      
+      if (files && files.length > 0) {
+        const paths = files.map(f => f.path);
+        await supabaseAdmin.storage
+          .from('planpal-files')
+          .remove(paths);
+      }
+      
+      // Soft delete workspace
+      await supabase
+        .from('workspaces')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', personalWorkspace.workspace_id);
+    }
+    
+    // Delete auth user with admin client
+    const { error: deleteAuthError } = await supabaseAdmin.auth.admin.deleteUser(req.user.id);
+    
+    if (deleteAuthError) {
+      logger.error('Failed to delete auth user', deleteAuthError);
+      throw new AppError(ErrorCodes.INTERNAL_ERROR, 'Failed to complete account deletion');
+    }
+    
+    res.status(204).send();
   } catch (error) {
     next(error);
   }

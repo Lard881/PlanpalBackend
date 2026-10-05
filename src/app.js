@@ -10,6 +10,18 @@ import { generalLimiter } from './middleware/rateLimit.js';
 // Routes
 import healthRouter from './routes/health.js';
 import meRouter from './routes/me.js';
+import workspacesRouter from './routes/workspaces.js';
+import labelsRouter from './routes/labels.js';
+import syncRouter from './routes/sync.js';
+import tasksRouter from './routes/tasks.js';
+import eventsRouter from './routes/events.js';
+import filesRouter from './routes/files.js';
+import documentsRouter from './routes/documents.js';
+import channelsRouter from './routes/channels.js';
+import notificationsRouter from './routes/notifications.js';
+import devicesRouter from './routes/devices.js';
+import searchRouter from './routes/search.js';
+import analyticsRouter from './routes/analytics.js';
 
 export function createApp() {
   const app = express();
@@ -31,6 +43,12 @@ export function createApp() {
   // Logging
   app.use(httpLogger);
   
+  // Attach request ID to response header
+  app.use((req, res, next) => {
+    res.setHeader('X-Request-Id', req.id);
+    next();
+  });
+  
   // Health check (no auth)
   app.use('/health', healthRouter);
   
@@ -43,6 +61,22 @@ export function createApp() {
   
   // API endpoints
   apiRouter.use('/me', meRouter);
+  apiRouter.use('/workspaces', workspacesRouter);
+  apiRouter.use('/', tasksRouter); // Tasks routes (includes /tasks, /subtasks, /comments)
+  apiRouter.use('/', filesRouter); // Files routes (includes /files)
+  apiRouter.use('/notifications', notificationsRouter);
+  apiRouter.use('/devices', devicesRouter);
+  apiRouter.use('/search', searchRouter);
+  
+  // Nested routes under workspaces
+  const workspaceNestedRouter = express.Router({ mergeParams: true });
+  workspaceNestedRouter.use('/labels', labelsRouter);
+  workspaceNestedRouter.use('/sync', syncRouter);
+  workspaceNestedRouter.use('/events', eventsRouter);
+  workspaceNestedRouter.use('/', documentsRouter); // folders and documents
+  workspaceNestedRouter.use('/', channelsRouter); // channels and messages
+  workspaceNestedRouter.use('/', analyticsRouter); // analytics and overview
+  apiRouter.use('/workspaces/:workspaceId', workspaceNestedRouter);
   
   app.use('/api/v1', apiRouter);
   

@@ -12,7 +12,7 @@ const router = express.Router();
 router.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    time: new Date().toISOString(),
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -39,6 +39,7 @@ router.get('/db', async (req, res) => {
     
     res.json({
       status: 'ok',
+      database: 'connected',
     });
   } catch (error) {
     logger.error('Database health check error', error);
