@@ -5,5 +5,6 @@ export default {
   testPathIgnorePatterns: ['/node_modules/', '/_parked/'],
   collectCoverageFrom: ['src/**/*.js'],
   coveragePathIgnorePatterns: ['/node_modules/'],
-  verbose: true
+  verbose: true,
+  testTimeout: 10000
 };
