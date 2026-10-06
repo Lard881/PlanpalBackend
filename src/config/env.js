@@ -12,6 +12,12 @@ const envSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   SUPABASE_JWT_SECRET: z.string().optional(),
   
+  // Test database credentials (optional, used when NODE_ENV=test)
+  TEST_SUPABASE_URL: z.string().url().optional(),
+  TEST_SUPABASE_ANON_KEY: z.string().min(1).optional(),
+  TEST_SUPABASE_SERVICE_KEY: z.string().min(1).optional(),
+  TEST_SUPABASE_JWT_SECRET: z.string().optional(),
+  
   FIREBASE_SERVICE_ACCOUNT_JSON: z.string().optional(),
   CRON_SECRET: z.string().optional(),
   
@@ -36,10 +42,19 @@ export const config = {
   isTest: env.NODE_ENV === 'test',
   
   supabase: {
-    url: env.SUPABASE_URL,
-    anonKey: env.SUPABASE_ANON_KEY,
-    serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
-    jwtSecret: env.SUPABASE_JWT_SECRET,
+    // Use TEST credentials when NODE_ENV=test, otherwise use production
+    url: env.NODE_ENV === 'test' && env.TEST_SUPABASE_URL 
+      ? env.TEST_SUPABASE_URL 
+      : env.SUPABASE_URL,
+    anonKey: env.NODE_ENV === 'test' && env.TEST_SUPABASE_ANON_KEY 
+      ? env.TEST_SUPABASE_ANON_KEY 
+      : env.SUPABASE_ANON_KEY,
+    serviceRoleKey: env.NODE_ENV === 'test' && env.TEST_SUPABASE_SERVICE_KEY 
+      ? env.TEST_SUPABASE_SERVICE_KEY 
+      : env.SUPABASE_SERVICE_ROLE_KEY,
+    jwtSecret: env.NODE_ENV === 'test' && env.TEST_SUPABASE_JWT_SECRET 
+      ? env.TEST_SUPABASE_JWT_SECRET 
+      : env.SUPABASE_JWT_SECRET,
   },
   
   firebase: {

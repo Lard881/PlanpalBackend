@@ -1,10 +1,23 @@
 import request from 'supertest';
+import { createClient } from '@supabase/supabase-js';
+import { describe, test, expect, beforeAll, afterAll } from '@jest/globals';
 import { createApp } from '../src/app.js';
 
-const app = createApp();
+// Use TEST database
+const SUPABASE_URL = process.env.TEST_SUPABASE_URL || process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.TEST_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
+const SUPABASE_SERVICE_KEY = process.env.TEST_SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-describe('Stage 5: Workspaces, Members, and Invite Codes', () => {
-  const testEmail = `test.${Date.now()}@planpal.test`;
+const skipTests = !SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_KEY;
+
+if (skipTests) {
+  console.log('\n⚠️  Skipping Stage 5 tests: Supabase credentials not set\n');
+}
+
+(skipTests ? describe.skip : describe)('Stage 5: Workspaces, Members, and Invite Codes', () => {
+  let app;
+  let supabaseAdmin;
+  const testEmail = `test-ws-${Date.now()}@planpal.test`;
   const testPassword = 'TestPass123!';
   let authToken = null;
   let userId = null;
@@ -13,22 +26,35 @@ describe('Stage 5: Workspaces, Members, and Invite Codes', () => {
   let inviteCode = null;
   let inviteId = null;
 
-  // Helper function to create test user via Supabase Auth
-  async function createTestUser() {
-    // This will be replaced with actual Supabase admin client call
-    // For now, we'll use a mock token
-    // In real tests, use: adminClient.auth.admin.createUser()
-    return {
-      token: 'mock_token_for_testing',
-      userId: 'mock_user_id',
-    };
-  }
-
   beforeAll(async () => {
-    // Create test user
-    const testUser = await createTestUser();
-    authToken = testUser.token;
-    userId = testUser.userId;
+    app = createApp();
+    supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+
+    // Create REAL test user
+    const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+      email: testEmail,
+      password: testPassword,
+      email_confirm: true,
+    });
+
+    if (authError) throw authError;
+    userId = authData.user.id;
+
+    // Get REAL auth token
+    const { data: signInData, error: signInError } = await supabaseAdmin.auth.signInWithPassword({
+      email: testEmail,
+      password: testPassword,
+    });
+
+    if (signInError) throw signInError;
+    authToken = signInData.session.access_token;
+  });
+
+  afterAll(async () => {
+    // Clean up test user
+    if (userId && supabaseAdmin) {
+      await supabaseAdmin.auth.admin.deleteUser(userId);
+    }
   });
 
   describe('S5.1: List Workspaces', () => {
