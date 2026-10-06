@@ -6,7 +6,7 @@ import { ZodError } from 'zod';
  * Central error handler
  */
 export function errorHandler(err, req, res, _next) {
-  const requestId = req.id || 'unknown';
+  const requestId = req.id ? String(req.id) : 'unknown';
   
   // Log error
   logger.error({

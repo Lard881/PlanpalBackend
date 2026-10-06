@@ -224,14 +224,14 @@ if (skipTests) {
         .post(`/api/v1/workspaces/${teamWorkspaceId}/invites`)
         .set('Authorization', `Bearer ${authToken}`)
         .send({
-          role: 'full',
+          role: 'member',
           maxUses: 5,
         })
         .expect(201);
 
       expect(res.body.invite).toBeDefined();
       expect(res.body.invite.code).toHaveLength(8);
-      expect(res.body.invite.role).toBe('full');
+      expect(res.body.invite.role).toBe('member');
       expect(res.body.invite.max_uses).toBe(5);
       
       inviteCode = res.body.invite.code;
@@ -288,7 +288,7 @@ if (skipTests) {
       const res = await request(app)
         .post(`/api/v1/workspaces/${teamWorkspaceId}/invites`)
         .set('Authorization', `Bearer ${authToken}`)
-        .send({ role: 'full' });
+        .send({ role: 'member' });
       
       validInviteCode = res.body.invite.code;
     });
@@ -368,7 +368,7 @@ if (skipTests) {
       const res = await request(app)
         .patch(`/api/v1/workspaces/${teamWorkspaceId}/members/${userId}`)
         .set('Authorization', `Bearer ${authToken}`)
-        .send({ role: 'full' })
+        .send({ role: 'member' })
         .expect(403);
 
       expect(res.body.error.code).toBe('LAST_ADMIN');

@@ -21,7 +21,7 @@ const overviewQuerySchema = z.object({
 router.get(
   '/',
   loadWorkspace,
-  requireRole('admin', 'full'), // Guests blocked
+  requireRole('admin', 'member'), // Guests blocked
   validate(analyticsQuerySchema, 'query'),
   async (req, res, next) => {
     try {

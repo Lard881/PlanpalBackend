@@ -22,11 +22,11 @@ const joinWorkspaceSchema = z.object({
 });
 
 const updateMemberSchema = z.object({
-  role: z.enum(['admin', 'full', 'guest']),
+  role: z.enum(['admin', 'member', 'guest']),
 });
 
 const createInviteSchema = z.object({
-  role: z.enum(['admin', 'full', 'guest']),
+  role: z.enum(['admin', 'member', 'guest']),
   maxUses: z.number().int().min(1).optional(),
   expiresAt: z.string().datetime().optional(),
 });
@@ -79,13 +79,17 @@ router.post('/', validate(createWorkspaceSchema), async (req, res, next) => {
     const { name } = req.body;
     const supabase = userClient(req.jwt);
     
-    // Create workspace (trigger will add creator as admin and create #general channel)
+    // Create workspace
+    // Note: The database trigger 'handle_new_team_workspace' automatically:
+    // 1. Creates workspace_members record (creator as admin)
+    // 2. Creates #general channel
+    // 3. Adds creator to #general channel
     const { data: workspace, error } = await supabase
       .from('workspaces')
       .insert({
         name,
         type: 'team',
-        owner_id: req.user.id,
+        created_by: req.user.id,
       })
       .select()
       .single();
@@ -392,23 +396,38 @@ router.delete(
       
       const supabase = userClient(req.jwt);
       
-      const { error } = await supabase
+      // Check if removing last admin (for self-removal and admin removing admin)
+      const { data: targetMember } = await supabase
         .from('workspace_members')
-        .delete()
+        .select('role')
         .eq('workspace_id', req.params.workspaceId)
-        .eq('user_id', targetUserId);
+        .eq('user_id', targetUserId)
+        .single();
       
-      if (error) {
-        // Check for LAST_ADMIN protection trigger
-        if (error.message?.includes('last admin')) {
+      if (targetMember && targetMember.role === 'admin') {
+        // Count total admins
+        const { count: adminCount } = await supabase
+          .from('workspace_members')
+          .select('*', { count: 'exact', head: true })
+          .eq('workspace_id', req.params.workspaceId)
+          .eq('role', 'admin');
+        
+        if (adminCount <= 1) {
           throw new AppError(
             ErrorCodes.LAST_ADMIN,
             'Cannot remove the last admin',
             403
           );
         }
-        throw error;
       }
+      
+      const { error } = await supabase
+        .from('workspace_members')
+        .delete()
+        .eq('workspace_id', req.params.workspaceId)
+        .eq('user_id', targetUserId);
+      
+      if (error) throw error;
       
       res.status(204).send();
     } catch (error) {
