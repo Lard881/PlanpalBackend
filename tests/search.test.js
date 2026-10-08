@@ -7,21 +7,32 @@
  * - No duplicate people
  */
 
-import request from 'supertest';
-import app from '../src/server.js';
+import { describe, test, expect, beforeAll, afterAll } from '@jest/globals';
 import { createClient } from '@supabase/supabase-js';
+import request from 'supertest';
+import { createApp } from '../src/app.js';
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const supabase = createClient(supabaseUrl, supabaseServiceKey);
+const supabaseUrl = process.env.TEST_SUPABASE_URL || process.env.SUPABASE_URL;
+const supabaseServiceKey = process.env.TEST_SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-describe('Stage 12: Search Tests (S12.2)', () => {
+const skipTests = !supabaseUrl || !supabaseServiceKey;
+
+if (skipTests) {
+  console.log('\n⚠️  Skipping Search tests: Test database credentials not set\n');
+}
+
+(skipTests ? describe.skip : describe)('Stage 12: Search Tests (S12.2)', () => {
+  let app;
+  let supabase;
   let user1Token, user2Token, guestToken;
   let user1Id, user2Id, guestId;
   let workspace1Id, workspace2Id;
   let task1Id, task2Id, doc1Id;
 
   beforeAll(async () => {
+    app = createApp();
+    supabase = createClient(supabaseUrl, supabaseServiceKey);
+
     // Create test users
     const { data: u1 } = await supabase.auth.admin.createUser({
       email: `search-user1-${Date.now()}@test.com`,
