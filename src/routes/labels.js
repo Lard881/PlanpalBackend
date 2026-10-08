@@ -8,6 +8,7 @@ const router = express.Router({ mergeParams: true }); // mergeParams for :worksp
 
 // Validation schemas
 const createLabelSchema = z.object({
+  id: z.string().uuid().optional(), // Client-supplied ID for idempotency
   name: z.string().min(1).max(50),
   color: z.string().regex(/^#[0-9A-Fa-f]{6}$/),
 });
@@ -44,7 +45,7 @@ router.get('/', loadWorkspace, async (req, res, next) => {
 
 /**
  * POST /workspaces/:workspaceId/labels
- * Create a new label
+ * Create a new label (idempotent with client-supplied ID)
  */
 router.post(
   '/',
@@ -52,12 +53,29 @@ router.post(
   validate(createLabelSchema),
   async (req, res, next) => {
     try {
-      const { name, color } = req.body;
+      const { id, name, color } = req.body;
       const supabase = userClient(req.jwt);
       
+      // If client provided an ID, check if it already exists (idempotency)
+      if (id) {
+        const { data: existing } = await supabase
+          .from('labels')
+          .select('*')
+          .eq('id', id)
+          .eq('workspace_id', req.params.workspaceId)
+          .single();
+        
+        if (existing) {
+          // Already exists - return it (idempotent)
+          return res.status(200).json({ label: existing });
+        }
+      }
+      
+      // Create new label
       const { data: label, error } = await supabase
         .from('labels')
         .insert({
+          ...(id && { id }), // Include client ID if provided
           workspace_id: req.params.workspaceId,
           name,
           color,
