@@ -1,7 +1,7 @@
 import express from 'express';
 import { z } from 'zod';
 import { userClient } from '../lib/supabase.js';
-import { loadWorkspace, requireRole } from '../middleware/workspace.js';
+import { loadWorkspace } from '../middleware/workspace.js';
 import { validate } from '../middleware/validate.js';
 import { AppError, ErrorCodes } from '../lib/errors.js';
 

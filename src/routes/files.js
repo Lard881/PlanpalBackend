@@ -30,7 +30,8 @@ const ALLOWED_MIME_TYPES = [
  */
 function sanitizeFileName(name) {
   return name
-    .replace(/[\/\\:*?"<>|]/g, '_') // Remove path separators and invalid chars
+    .replace(/[/\\:*?"<>|]/g, '_') // Remove path separators and invalid chars
+    // eslint-disable-next-line no-control-regex -- Removing control characters for file safety
     .replace(/[\x00-\x1F\x7F]/g, '') // Remove control characters
     .substring(0, 120); // Limit to 120 characters
 }

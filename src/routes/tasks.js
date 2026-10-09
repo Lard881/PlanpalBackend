@@ -2,7 +2,7 @@ import express from 'express';
 import { z } from 'zod';
 import { userClient } from '../lib/supabase.js';
 import { AppError, ErrorCodes } from '../lib/errors.js';
-import { loadWorkspace, requireRole } from '../middleware/workspace.js';
+import { loadWorkspace } from '../middleware/workspace.js';
 import { validate } from '../middleware/validate.js';
 
 const router = express.Router();
@@ -449,7 +449,7 @@ router.post('/tasks/bulk', validate(bulkActionSchema), async (req, res, next) =>
         }
 
         succeeded.push(id);
-      } catch (error) {
+      } catch {
         failed.push({ id, code: 'OPERATION_FAILED' });
       }
     }

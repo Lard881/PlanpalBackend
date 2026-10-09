@@ -2,7 +2,6 @@ import express from 'express';
 import { z } from 'zod';
 import { userClient } from '../lib/supabase.js';
 import { validate } from '../middleware/validate.js';
-import { AppError, ErrorCodes } from '../lib/errors.js';
 
 const router = express.Router();
 
