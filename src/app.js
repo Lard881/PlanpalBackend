@@ -9,6 +9,7 @@ import { generalLimiter } from './middleware/rateLimit.js';
 
 // Routes
 import healthRouter from './routes/health.js';
+import internalRouter from './routes/internal.js';
 import meRouter from './routes/me.js';
 import workspacesRouter from './routes/workspaces.js';
 import labelsRouter from './routes/labels.js';
@@ -51,6 +52,9 @@ export function createApp() {
   
   // Health check (no auth)
   app.use('/health', healthRouter);
+
+  // Internal routes (cron jobs — no user auth, secret-based)
+  app.use('/internal', internalRouter);
   
   // API routes
   const apiRouter = express.Router();

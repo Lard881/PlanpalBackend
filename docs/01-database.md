@@ -1,69 +1,56 @@
--- ============================================================================
--- 0001_types.sql
--- ============================================================================
+# PlanPal: Database (Supabase Postgres)
 
--- ============================================================================
--- Migration 0001: PostgreSQL Extensions and Custom Types
--- ============================================================================
--- Description: Sets up required PostgreSQL extensions and creates custom enum
---              types used throughout the database schema.
--- Run this in Supabase SQL Editor or via CLI: supabase db push
--- ============================================================================
+> Run the SQL blocks below in order, each as a file in `supabase/migrations/` (for example `0001_types.sql`, `0002_core.sql`).
+> Start with an **empty** project. There is no seed data and no mock data.
+> Rules from `00-overview.md` apply: RLS on for every table, soft delete for synced tables, server-set `updated_at`.
 
--- Enable required PostgreSQL extensions
-create extension if not exists "pgcrypto";      -- For gen_random_uuid()
-create extension if not exists "pg_trgm";       -- For fuzzy text search (similarity)
-create extension if not exists "pg_cron";       -- For scheduled jobs (reminders)
+---
 
--- Workspace Types: personal (one per user) or team (collaborative)
+## 1. Plain-language map
+
+Think of the database as a filing office:
+
+- **profiles**: one card per person.
+- **workspaces**: the "rooms". Every person has a private Personal room and can be in many Team rooms.
+- **workspace_members**: who is in which room, and their role.
+- **tasks** (with **subtasks**, **task_comments**, **task_attachments**, **labels**): the work.
+- **events** (with **event_attendees**): calendar.
+- **channels**, **channel_members**, **messages**: chat.
+- **files**, **folders**, **documents**: uploaded files and written documents.
+- **notifications**, **device_tokens**: alerts and push.
+- **invite_codes**: how people join a Team room.
+
+All tables use `uuid` primary keys. The client may generate its own UUID for new rows (needed for offline creation), so inserts must accept a client-supplied `id`.
+
+---
+
+## 2. Migration 0001: extensions and types
+
+```sql
+create extension if not exists "pgcrypto";
+create extension if not exists "pg_trgm";
+create extension if not exists "pg_cron";
+
 create type workspace_type as enum ('personal', 'team');
-
--- Member Roles: admin (full control), member (standard access), guest (limited)
 create type member_role as enum ('admin', 'member', 'guest');
-
--- Task Status: workflow states
 create type task_status as enum ('todo', 'in_progress', 'completed');
-
--- Task Priority: importance levels
 create type task_priority as enum ('high', 'medium', 'low');
-
--- Channel Kind: regular channel or direct message
 create type channel_kind as enum ('channel', 'dm');
-
--- Document Kind: uploaded file or written document (Quill editor)
 create type document_kind as enum ('file', 'written');
-
--- Notification Types: all possible notification categories
 create type notification_type as enum (
-  'task_assigned',          -- Task assigned to you
-  'task_updated',           -- Task you're involved with changed
-  'task_comment',           -- New comment on your task
-  'mention',                -- Someone @mentioned you
-  'deadline_approaching',   -- Task due within 24 hours
-  'task_overdue',           -- Task past due date
-  'event_reminder',         -- Calendar event starting soon
-  'chat_message',           -- New chat message
-  'member_joined',          -- New member joined workspace
-  'system'                  -- System notifications
+  'task_assigned', 'task_updated', 'task_comment', 'mention',
+  'deadline_approaching', 'task_overdue', 'event_reminder',
+  'chat_message', 'member_joined', 'system'
 );
 
--- Note: Overdue status is NOT stored in the database.
--- A task is overdue when: status <> 'completed' AND due_at < now()
+-- Overdue is NOT stored. A task is overdue when status <> 'completed' and due_at < now().
+```
 
+---
 
--- ============================================================================
--- 0002_core_tables.sql
--- ============================================================================
+## 3. Migration 0002: core tables
 
--- ============================================================================
--- Migration 0002: Core Tables
--- ============================================================================
--- Creates all core tables: profiles, workspaces, workspace_members, invite_codes,
--- labels, files, tasks, subtasks, task_comments, task_attachments, events,
--- event_attendees, channels, channel_members, messages, folders, documents,
--- notifications, device_tokens
--- ============================================================================
-
+```sql
 -- Sets updated_at on the server for every insert/update (used for offline sync, last write wins)
 create or replace function set_updated_at() returns trigger
 language plpgsql as $$
@@ -265,6 +252,7 @@ create table channels (
   deleted_at timestamptz,
   check (kind = 'dm' or name is not null)
 );
+-- One #general channel per team workspace is created by trigger (section 6).
 
 create table channel_members (
   channel_id uuid not null references channels(id) on delete cascade,
@@ -276,7 +264,7 @@ create table channel_members (
 create index on channel_members (user_id);
 
 create table messages (
-  id uuid primary key default gen_random_uuid(),
+  id uuid primary key default gen_random_uuid(),   -- client supplies this so a retry never duplicates
   channel_id uuid not null references channels(id) on delete cascade,
   sender_id uuid not null references profiles(id),
   body text not null default '' check (char_length(body) <= 4000),
@@ -307,9 +295,9 @@ create table documents (
   folder_id uuid references folders(id) on delete set null,
   kind document_kind not null,
   title text not null check (char_length(title) between 1 and 200),
-  file_id uuid references files(id) on delete set null,
-  content jsonb,
-  content_text text not null default '',
+  file_id uuid references files(id) on delete set null,   -- when kind = 'file'
+  content jsonb,                                          -- when kind = 'written' (Quill delta)
+  content_text text not null default '',                  -- plain text copy, for search
   created_by uuid not null references profiles(id),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -330,9 +318,9 @@ create table notifications (
   type notification_type not null,
   title text not null,
   body text not null default '',
-  entity_type text,
+  entity_type text,                              -- 'task' | 'event' | 'channel' | 'document' | null
   entity_id uuid,
-  dedupe_key text unique,
+  dedupe_key text unique,                        -- stops duplicates, e.g. 'deadline:{task}:{due_at}:24h'
   read_at timestamptz,
   pushed_at timestamptz,
   created_at timestamptz not null default now(),
@@ -363,19 +351,17 @@ begin
       for each row execute function set_updated_at()', t, t);
   end loop;
 end $$;
+```
 
+Note: `task_attachments` and `event_attendees` use soft delete so that offline devices learn about removals.
 
--- ============================================================================
--- 0003_helper_functions.sql
--- ============================================================================
+---
 
--- ============================================================================
--- Migration 0003: Helper Functions (used by RLS)
--- ============================================================================
--- Security definer functions that read membership without triggering RLS recursion.
--- Always set search_path for security.
--- ============================================================================
+## 4. Migration 0003: helper functions (used by RLS)
 
+`security definer` functions read membership without triggering RLS recursion. Always set `search_path`.
+
+```sql
 create or replace function is_member(ws uuid) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from workspace_members
@@ -392,7 +378,7 @@ language sql stable security definer set search_path = public as $$
   select coalesce(member_role_in(ws) = 'admin', false);
 $$;
 
-create or replace function is_full_member(ws uuid) returns boolean
+create or replace function is_full_member(ws uuid) returns boolean   -- admin or member, not guest
 language sql stable security definer set search_path = public as $$
   select coalesce(member_role_in(ws) in ('admin','member'), false);
 $$;
@@ -416,20 +402,15 @@ create or replace function is_personal(ws uuid) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from workspaces where id = ws and type = 'personal');
 $$;
+```
 
+---
 
--- ============================================================================
--- 0004_rls_policies.sql
--- ============================================================================
+## 5. Migration 0004: Row Level Security
 
--- ============================================================================
--- Migration 0004: Row Level Security (RLS) Policies
--- ============================================================================
--- Enable RLS on every table and define policies.
--- Express user client obeys these; admin client bypasses them.
--- ============================================================================
+Enable RLS on every table. The Express **user client** obeys these policies. Express's admin client bypasses them, so Express must check permissions itself in those code paths (see `02-backend.md`).
 
--- Enable RLS on all tables
+```sql
 alter table profiles enable row level security;
 alter table workspaces enable row level security;
 alter table workspace_members enable row level security;
@@ -462,13 +443,15 @@ create policy profiles_update on profiles for update
 
 -- workspaces
 create policy ws_select on workspaces for select using (is_member(id) or created_by = auth.uid());
+-- (the created_by part lets INSERT ... RETURNING work before the membership trigger row is visible)
 create policy ws_insert on workspaces for insert
-  with check (created_by = auth.uid() and type = 'team');
+  with check (created_by = auth.uid() and type = 'team');   -- personal rooms come only from the signup trigger
 create policy ws_update on workspaces for update
   using (is_admin(id)) with check (is_admin(id));
 create policy ws_delete on workspaces for delete using (is_admin(id) and type = 'team');
 
 -- workspace_members
+-- Guests may only see themselves and admins.
 create policy wm_select on workspace_members for select using (
   is_member(workspace_id) and (
     is_full_member(workspace_id) or user_id = auth.uid() or role = 'admin')
@@ -478,8 +461,9 @@ create policy wm_update on workspace_members for update
   with check (is_admin(workspace_id));
 create policy wm_delete on workspace_members for delete using (
   (is_admin(workspace_id) and not is_personal(workspace_id))
-  or (user_id = auth.uid() and not is_personal(workspace_id))
+  or (user_id = auth.uid() and not is_personal(workspace_id))    -- leaving a team
 );
+-- Inserts into workspace_members happen only through join_workspace() and the create-workspace trigger.
 
 -- invite_codes: admins only, team workspaces only
 create policy ic_all on invite_codes for all
@@ -491,7 +475,7 @@ create policy labels_select on labels for select using (is_member(workspace_id))
 create policy labels_write on labels for all
   using (is_full_member(workspace_id)) with check (is_full_member(workspace_id));
 
--- files: full members see and create; guests see files on tasks assigned to them
+-- files: full members see and create; guests see files on tasks assigned to them (through attachments)
 create policy files_select on files for select using (
   is_full_member(workspace_id)
   or exists (select 1 from task_attachments ta join tasks t on t.id = ta.task_id
@@ -511,12 +495,11 @@ create policy tasks_insert on tasks for insert
 create policy tasks_update on tasks for update using (
   is_admin(workspace_id)
   or (is_full_member(workspace_id) and (created_by = auth.uid() or assignee_id = auth.uid()))
-  or (is_member(workspace_id) and assignee_id = auth.uid())
+  or (is_member(workspace_id) and assignee_id = auth.uid())          -- guest on own task
 ) with check (
   is_member(workspace_id)
 );
-
--- tasks_guard: enforces delete permission, guest restrictions, and workspace move rules
+-- Hard delete is not used by the app. "Delete" = update deleted_at. Only admin or creator may set it:
 create or replace function tasks_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
@@ -526,6 +509,7 @@ begin
     end if;
   end if;
   if member_role_in(old.workspace_id) = 'guest' then
+    -- guests may change status only
     if new.title <> old.title or new.description <> old.description or new.priority <> old.priority
        or new.due_at is distinct from old.due_at or new.assignee_id is distinct from old.assignee_id
        or new.workspace_id <> old.workspace_id then
@@ -541,9 +525,9 @@ end $$;
 create trigger tasks_guard_trg before update on tasks
   for each row execute function tasks_guard();
 
--- subtasks
+-- subtasks, comments, attachments follow the parent task
 create policy subtasks_select on subtasks for select using (
-  exists (select 1 from tasks t where t.id = subtasks.task_id));
+  exists (select 1 from tasks t where t.id = subtasks.task_id));   -- inherits tasks RLS
 create policy subtasks_write on subtasks for all using (
   exists (select 1 from tasks t where t.id = subtasks.task_id
           and (is_full_member(t.workspace_id) or t.assignee_id = auth.uid()))
@@ -552,7 +536,6 @@ create policy subtasks_write on subtasks for all using (
           and (is_full_member(t.workspace_id) or t.assignee_id = auth.uid()))
 );
 
--- task_comments
 create policy comments_select on task_comments for select using (
   exists (select 1 from tasks t where t.id = task_comments.task_id));
 create policy comments_insert on task_comments for insert with check (
@@ -561,7 +544,6 @@ create policy comments_insert on task_comments for insert with check (
 create policy comments_update on task_comments for update using (
   author_id = auth.uid() or is_admin(task_workspace(task_id)));
 
--- task_attachments
 create policy attach_select on task_attachments for select using (
   exists (select 1 from tasks t where t.id = task_attachments.task_id));
 create policy attach_write on task_attachments for all using (
@@ -580,8 +562,6 @@ create policy events_select on events for select using (
 );
 create policy events_write on events for all
   using (is_full_member(workspace_id)) with check (is_full_member(workspace_id));
-
--- event_attendees
 create policy attendees_select on event_attendees for select using (
   exists (select 1 from events e where e.id = event_attendees.event_id));
 create policy attendees_write on event_attendees for all using (
@@ -603,10 +583,10 @@ create policy ch_insert on channels for insert with check (
 create policy ch_update on channels for update
   using (is_admin(workspace_id) or created_by = auth.uid());
 
--- channel_members
 create policy cm_select on channel_members for select using (
   user_id = auth.uid() or is_channel_member(channel_id));
 create policy cm_insert on channel_members for insert with check (
+  -- join a public channel yourself, or be added by an admin / the channel creator
   (user_id = auth.uid() and exists (select 1 from channels c where c.id = channel_id
      and c.kind = 'channel' and not c.is_private and is_full_member(c.workspace_id)))
   or is_admin(channel_workspace(channel_id))
@@ -616,7 +596,6 @@ create policy cm_update on channel_members for update using (user_id = auth.uid(
 create policy cm_delete on channel_members for delete using (
   user_id = auth.uid() or is_admin(channel_workspace(channel_id)));
 
--- messages
 create policy msg_select on messages for select using (
   is_channel_member(channel_id)
   or exists (select 1 from channels c where c.id = messages.channel_id
@@ -639,19 +618,16 @@ create policy notif_select on notifications for select using (user_id = auth.uid
 create policy notif_update on notifications for update using (user_id = auth.uid());
 create policy dt_all on device_tokens for all
   using (user_id = auth.uid()) with check (user_id = auth.uid());
+-- Notification INSERT is done only by Express (admin client) and pg_cron functions.
+```
 
+Test requirement: write automated SQL/API tests proving a Member of workspace A cannot read anything in workspace B, a Guest cannot read unassigned tasks, and nobody can read another user's notifications.
 
--- ============================================================================
--- 0005_triggers_functions.sql
--- ============================================================================
+---
 
--- ============================================================================
--- Migration 0005: Triggers and Business Logic Functions
--- ============================================================================
--- Handles: new user setup, workspace creation, member joining, last admin protection,
--- join_workspace, move_task_to_workspace, get_or_create_dm
--- ============================================================================
+## 6. Migration 0005: triggers and functions
 
+```sql
 -- 6.1 New user: create profile, Personal workspace and membership
 create or replace function handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
@@ -761,13 +737,14 @@ begin
                  and user_id = auth.uid() and role in ('admin','member')) then
     raise exception 'not a member of the target workspace' using errcode = '42501'; end if;
 
-  perform set_config('planpal.moving', '1', true);
+  perform set_config('planpal.moving', '1', true);   -- tells tasks_guard this move is allowed
   update tasks set
     workspace_id = p_target,
-    label_id = null,
+    label_id = null,   -- labels belong to a workspace
     assignee_id = case when exists (select 1 from workspace_members
         where workspace_id = p_target and user_id = t.assignee_id) then t.assignee_id else null end
   where id = p_task;
+  -- attachments follow the task; their file rows change workspace, storage paths stay as they are
   update files set workspace_id = p_target
   where id in (select file_id from task_attachments where task_id = p_task);
 end $$;
@@ -793,18 +770,17 @@ begin
   end if;
   return ch;
 end $$;
+```
 
+Implementation note for 6.6: `tasks_guard()` (section 5) blocks a normal update of `workspace_id`. `move_task_to_workspace()` sets the session flag `planpal.moving` for its own transaction so the guard lets that one change through. Test that (a) a normal client update of `workspace_id` fails and (b) `move_task_to_workspace` succeeds. Note: the guest check inside `tasks_guard` also compares `workspace_id`; when the flag is set, skip that comparison too (only admins and members can call the move function, so guests never reach it).
 
--- ============================================================================
--- 0006_search.sql
--- ============================================================================
+---
 
--- ============================================================================
--- Migration 0006: Global Search
--- ============================================================================
--- Searches tasks, documents, and people. RLS applies (security invoker).
--- ============================================================================
+## 7. Migration 0006: search
 
+Global search covers **tasks, documents and people** in the first release. All functions are `security invoker`, so RLS decides what a user can see.
+
+```sql
 create or replace function search_all(p_query text, p_workspace uuid default null, p_limit int default 20)
 returns table (kind text, id uuid, workspace_id uuid, title text, subtitle text, score real, at timestamptz)
 language sql stable security invoker set search_path = public as $$
@@ -833,19 +809,19 @@ language sql stable security invoker set search_path = public as $$
   order by 6 desc
   limit p_limit;
 $$;
+```
 
+The design shows a "match %". The API returns `score` and Flutter converts it to a percentage capped at 99 for display.
 
--- ============================================================================
--- 0007_analytics.sql
--- ============================================================================
+Later stage (not now): chat messages and calendar events search.
 
--- ============================================================================
--- Migration 0007: Analytics Functions
--- ============================================================================
--- All functions are security invoker (RLS applies).
--- Analytics are per workspace.
--- ============================================================================
+---
 
+## 8. Migration 0007: analytics
+
+All functions are `security invoker`. Analytics are per workspace. In a Personal workspace they show the owner's own numbers.
+
+```sql
 -- Summary cards on the Analytics page and Home "Overview"
 create or replace function analytics_summary(p_workspace uuid, p_from timestamptz, p_to timestamptz)
 returns table (
@@ -872,6 +848,8 @@ returns table (
         and completed_at between p_from and p_to), 0), 0)
   from cur;
 $$;
+-- "Team velocity" in the design = on_time_rate (percent of completed tasks finished by their due date).
+-- "vs last month" = compare completed with completed_prev.
 
 -- Weekly Task Output bars: completed tasks per weekday
 create or replace function analytics_weekly(p_workspace uuid, p_from timestamptz, p_to timestamptz)
@@ -920,21 +898,17 @@ language sql stable security invoker set search_path = public as $$
           where grp = (select grp from islands order by d desc limit 1)
             and (select max(d) from islands) >= current_date - 1), 0);
 $$;
+```
 
+"Export CSV" is done in Flutter from the same data (or a `GET /analytics/export` endpoint, see `02-backend.md`).
 
--- ============================================================================
--- 0008_pg_cron_reminders.sql
--- ============================================================================
+---
 
--- ============================================================================
--- Migration 0008: Scheduled Reminders and Push (pg_cron + pg_net)
--- ============================================================================
--- Runs every 5 minutes inside Supabase (always on).
--- Creates notification rows, then wakes Express to send pushes.
--- Free-tier safe: no timers inside Express.
--- ============================================================================
+## 9. Migration 0008: scheduled reminders (pg_cron)
 
--- Create deadline and event reminder notifications
+Runs every 5 minutes. It only creates notification rows. Express pushes them (see `02-backend.md`, push worker). `dedupe_key` guarantees one notification per event.
+
+```sql
 create or replace function create_deadline_notifications() returns void
 language plpgsql security definer set search_path = public as $$
 begin
@@ -969,88 +943,54 @@ begin
   on conflict (dedupe_key) do nothing;
 end $$;
 
--- Add push_attempts column to notifications
-alter table notifications add column if not exists push_attempts int not null default 0;
+select cron.schedule('planpal-reminders', '*/5 * * * *', $$select create_deadline_notifications()$$);
+```
 
--- Claims a batch of unsent notifications (two workers never send the same one)
-create or replace function claim_unpushed_notifications(p_limit int default 100)
-returns setof notifications
-language sql security definer set search_path = public as $$
-  update notifications n
-     set pushed_at = now(), push_attempts = n.push_attempts + 1
-   where n.id in (
-     select id from notifications
-      where pushed_at is null and push_attempts < 3
-        and created_at > now() - interval '1 day'
-      order by created_at
-      for update skip locked
-      limit p_limit)
-  returning n.*;
-$$;
-revoke all on function claim_unpushed_notifications(int) from public, anon, authenticated;
-grant execute on function claim_unpushed_notifications(int) to service_role;
+Client-facing wording is localized in Flutter from the notification `type` and `entity`, so store neutral English text here as a fallback only.
 
--- Enable pg_net for calling Express
-create extension if not exists pg_net;
+---
 
--- Wakes Render server and tells it to send pending pushes
-create or replace function run_reminders_and_push() returns void
-language plpgsql security definer set search_path = public as $$
-declare api_url text; cron_secret text;
-begin
-  perform create_deadline_notifications();
+## 10. Migration 0009: realtime
 
-  select decrypted_secret into api_url from vault.decrypted_secrets where name = 'planpal_api_url';
-  select decrypted_secret into cron_secret from vault.decrypted_secrets where name = 'planpal_cron_secret';
-  if api_url is not null and cron_secret is not null then
-    perform net.http_post(
-      url := api_url || '/internal/push/run',
-      headers := jsonb_build_object('Content-Type', 'application/json', 'X-Cron-Secret', cron_secret),
-      body := '{}'::jsonb,
-      timeout_milliseconds := 60000);
-  end if;
-end $$;
+Enable Supabase Realtime for tables that the app listens to. RLS still decides who receives each change.
 
--- Schedule: run every 5 minutes
-select cron.schedule('planpal-reminders', '*/5 * * * *', $$select run_reminders_and_push()$$);
-
--- Weekly cleanup (Sunday 03:00 UTC) to stay inside free-tier storage
-create or replace function purge_old_rows() returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  delete from notifications where created_at < now() - interval '90 days';
-  delete from messages       where deleted_at < now() - interval '60 days';
-  delete from task_comments  where deleted_at < now() - interval '60 days';
-  delete from subtasks       where deleted_at < now() - interval '60 days';
-  delete from tasks          where deleted_at < now() - interval '60 days';
-  delete from events         where deleted_at < now() - interval '60 days';
-end $$;
-select cron.schedule('planpal-cleanup', '0 3 * * 0', $$select purge_old_rows()$$);
-
--- MANUAL SETUP REQUIRED (run once in Supabase SQL Editor with actual values):
--- select vault.create_secret('https://your-service.onrender.com', 'planpal_api_url');
--- select vault.create_secret('<same value as CRON_SECRET on Render>', 'planpal_cron_secret');
-
-
--- ============================================================================
--- 0009_realtime.sql
--- ============================================================================
-
--- ============================================================================
--- Migration 0009: Supabase Realtime Configuration
--- ============================================================================
--- Enable Realtime for tables that the app listens to.
--- RLS still applies to each change.
--- ============================================================================
-
+```sql
 alter publication supabase_realtime add table messages;
 alter publication supabase_realtime add table notifications;
 alter publication supabase_realtime add table tasks;
 alter publication supabase_realtime add table task_comments;
 alter publication supabase_realtime add table channel_members;
 alter publication supabase_realtime add table workspace_members;
+```
 
--- Presence (who is online) uses Realtime Presence on channel 'workspace:{id}'.
--- Only write profiles.last_seen_at occasionally (app close), not every few seconds.
+Presence (who is online) uses Realtime Presence on a channel named `workspace:{id}`; it needs no table. Only write `profiles.last_seen_at` occasionally (for example on app close), not every few seconds.
 
+---
 
+## 11. Storage
+
+One private bucket named `planpal-files`.
+
+- Bucket is **private**. No public URLs.
+- **No direct client access policies** on the bucket for the `authenticated` role. All uploads and downloads use **signed URLs that Express creates after checking permission** (see `02-backend.md`, files section).
+- Object path: `{workspace_id}/{file_id}/{original_name}`. The path is never used for permission. Permission comes from the `files` table row and RLS.
+- Limits: 25 MB per file for the first release (a Supabase free-plan file cap applies too, so check the project limit). Reject bigger files in the app before uploading.
+- Allowed types: images (jpg, png, webp, gif), pdf, docx, xlsx, pptx, txt, csv, zip. Reject anything else in Express.
+- Avatars: use the same bucket under `{user_id}/avatar/...` with a `files`-independent signed URL flow described in `02-backend.md`.
+
+---
+
+## 12. Supabase Auth settings
+
+- Email provider on. Confirm email on. Minimum password length 8.
+- Google provider on. Add the Android and Windows/web client IDs as needed.
+- Email OTP length 6 for recovery and confirmation.
+- Custom SMTP: Resend (host `smtp.resend.com`). This replaces the earlier failing Gmail SMTP.
+- Email templates: use `{{ .Token }}` (the 6-digit code) instead of a link. Keep the wording short and localized later.
+- Redirect URLs for Google login: mobile deep link and desktop loopback (see `03-frontend.md`, auth section).
+
+---
+
+## 13. Database checklist for the stages file
+
+See `04-task-stages.md`, Stage 1. In short: types, tables, helper functions, RLS, triggers/functions, search, analytics, cron, realtime, storage bucket, auth settings, and an automated RLS test suite.

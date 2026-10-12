@@ -1,103 +1,87 @@
--- ============================================================================
--- ONE-PASTE SETUP for PlanPal
--- ============================================================================
--- This file contains the complete database schema for PlanPal.
--- It combines migrations 0001 through 0009 plus storage bucket setup.
---
--- SAFE TO RUN MULTIPLE TIMES:
--- - All create statements use "if not exists" or "create or replace"
--- - Types, triggers, and policies are guarded against re-creation
--- - No data is deleted (no DROP TABLE, TRUNCATE, or DELETE)
---
--- HOW TO USE:
--- 1. Open Supabase Dashboard > SQL Editor > New query
--- 2. Paste this entire file
--- 3. Press "Run" once
--- 4. See HOW_TO_RUN.md for verification steps
---
--- ORDER OF EXECUTION:
--- 1. Extensions (pgcrypto, pg_trgm, pg_cron, pg_net)
--- 2. Custom types (workspace_type, member_role, task_status, etc.)
--- 3. Helper function (set_updated_at)
--- 4. Core tables (profiles, workspaces, tasks, etc.)
--- 5. Helper functions for RLS
--- 6. RLS policies and guards
--- 7. Triggers and functions (profile creation, workspace setup, etc.)
--- 8. Search indexes
--- 9. Analytics functions
--- 10. pg_cron reminder jobs
--- 11. Realtime publication
--- 12. Storage bucket
---
--- NOTE: Vault secrets for CRON must be set separately (see bottom of file)
--- ============================================================================
+-- =====================================================================
+-- PlanPal: ONE PASTE SETUP (database)
+-- Paste this WHOLE file into Supabase > SQL Editor > New query > Run.
+-- It is the nine migrations (0001 to 0009) joined in order, unchanged.
+-- Use a NEW, EMPTY Supabase project. It will refuse to run on a database
+-- that already has PlanPal tables (see the guard below).
+-- Before running: Database > Extensions > enable pg_cron and pg_net.
+-- =====================================================================
+do $guard$
+begin
+  if to_regclass('public.workspaces') is not null
+     or to_regclass('public.profiles') is not null
+     or to_regclass('public.tasks') is not null then
+    raise exception 'STOP: this database already has PlanPal tables (profiles/workspaces/tasks). Run this file only on a NEW empty Supabase project. Nothing was changed.';
+  end if;
+end
+$guard$;
 
--- ===== 0001_types =====
+
+-- ---------------------------------------------------------------
+-- 0001_types.sql
+-- ---------------------------------------------------------------
+-- ============================================================================
+-- Migration 0001: PostgreSQL Extensions and Custom Types
+-- ============================================================================
+-- Description: Sets up required PostgreSQL extensions and creates custom enum
+--              types used throughout the database schema.
+-- Run this in Supabase SQL Editor or via CLI: supabase db push
+-- ============================================================================
 
 -- Enable required PostgreSQL extensions
--- Note: pg_net must be enabled in Dashboard > Database > Extensions first
-create extension if not exists "pgcrypto";
-create extension if not exists "pg_trgm";
-create extension if not exists "pg_cron";
--- create extension if not exists "pg_net";  -- Enable this in Supabase Dashboard first
+create extension if not exists "pgcrypto";      -- For gen_random_uuid()
+create extension if not exists "pg_trgm";       -- For fuzzy text search (similarity)
+create extension if not exists "pg_cron";       -- For scheduled jobs (reminders)
 
--- Custom types (idempotent creation)
-do $$ begin
-  if not exists (select 1 from pg_type where typname = 'workspace_type') then
-    create type workspace_type as enum ('personal', 'team');
-  end if;
-end $$;
+-- Workspace Types: personal (one per user) or team (collaborative)
+create type workspace_type as enum ('personal', 'team');
 
-do $$ begin
-  if not exists (select 1 from pg_type where typname = 'member_role') then
-    create type member_role as enum ('admin', 'member', 'guest');
-  end if;
-end $$;
+-- Member Roles: admin (full control), member (standard access), guest (limited)
+create type member_role as enum ('admin', 'member', 'guest');
 
-do $$ begin
-  if not exists (select 1 from pg_type where typname = 'task_status') then
-    create type task_status as enum ('todo', 'in_progress', 'completed');
-  end if;
-end $$;
+-- Task Status: workflow states
+create type task_status as enum ('todo', 'in_progress', 'completed');
 
-do $$ begin
-  if not exists (select 1 from pg_type where typname = 'task_priority') then
-    create type task_priority as enum ('high', 'medium', 'low');
-  end if;
-end $$;
+-- Task Priority: importance levels
+create type task_priority as enum ('high', 'medium', 'low');
 
-do $$ begin
-  if not exists (select 1 from pg_type where typname = 'channel_kind') then
-    create type channel_kind as enum ('channel', 'dm');
-  end if;
-end $$;
+-- Channel Kind: regular channel or direct message
+create type channel_kind as enum ('channel', 'dm');
 
-do $$ begin
-  if not exists (select 1 from pg_type where typname = 'document_kind') then
-    create type document_kind as enum ('file', 'written');
-  end if;
-end $$;
+-- Document Kind: uploaded file or written document (Quill editor)
+create type document_kind as enum ('file', 'written');
 
-do $$ begin
-  if not exists (select 1 from pg_type where typname = 'notification_type') then
-    create type notification_type as enum (
-      'task_assigned',
-      'task_updated',
-      'task_comment',
-      'mention',
-      'deadline_approaching',
-      'task_overdue',
-      'event_reminder',
-      'chat_message',
-      'member_joined',
-      'system'
-    );
-  end if;
-end $$;
+-- Notification Types: all possible notification categories
+create type notification_type as enum (
+  'task_assigned',          -- Task assigned to you
+  'task_updated',           -- Task you're involved with changed
+  'task_comment',           -- New comment on your task
+  'mention',                -- Someone @mentioned you
+  'deadline_approaching',   -- Task due within 24 hours
+  'task_overdue',           -- Task past due date
+  'event_reminder',         -- Calendar event starting soon
+  'chat_message',           -- New chat message
+  'member_joined',          -- New member joined workspace
+  'system'                  -- System notifications
+);
 
--- ===== 0002_core_tables =====
+-- Note: Overdue status is NOT stored in the database.
+-- A task is overdue when: status <> 'completed' AND due_at < now()
 
--- Helper function for updated_at
+
+-- ---------------------------------------------------------------
+-- 0002_core_tables.sql
+-- ---------------------------------------------------------------
+-- ============================================================================
+-- Migration 0002: Core Tables
+-- ============================================================================
+-- Creates all core tables: profiles, workspaces, workspace_members, invite_codes,
+-- labels, files, tasks, subtasks, task_comments, task_attachments, events,
+-- event_attendees, channels, channel_members, messages, folders, documents,
+-- notifications, device_tokens
+-- ============================================================================
+
+-- Sets updated_at on the server for every insert/update (used for offline sync, last write wins)
 create or replace function set_updated_at() returns trigger
 language plpgsql as $$
 begin
@@ -105,26 +89,24 @@ begin
   return new;
 end $$;
 
--- profiles
-create table if not exists profiles (
+create table profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   full_name text not null default '',
   email text not null,
-  avatar_path text,
+  avatar_url text,
   timezone text not null default 'UTC',
   language text not null default 'en'
     check (language in ('en','es','fr','zh','ko')),
   theme text not null default 'system'
     check (theme in ('light','dark','system')),
-  personal_workspace_id uuid,
+  personal_workspace_id uuid,             -- filled by trigger in section 6
   last_seen_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   deleted_at timestamptz
 );
 
--- workspaces
-create table if not exists workspaces (
+create table workspaces (
   id uuid primary key default gen_random_uuid(),
   name text not null check (char_length(name) between 1 and 80),
   type workspace_type not null default 'team',
@@ -134,20 +116,11 @@ create table if not exists workspaces (
   deleted_at timestamptz
 );
 
--- Add foreign key from profiles to workspaces if not exists
-do $$ begin
-  if not exists (
-    select 1 from information_schema.table_constraints
-    where constraint_name = 'profiles_personal_ws_fk'
-  ) then
-    alter table profiles
-      add constraint profiles_personal_ws_fk
-      foreign key (personal_workspace_id) references workspaces(id);
-  end if;
-end $$;
+alter table profiles
+  add constraint profiles_personal_ws_fk
+  foreign key (personal_workspace_id) references workspaces(id);
 
--- workspace_members
-create table if not exists workspace_members (
+create table workspace_members (
   workspace_id uuid not null references workspaces(id) on delete cascade,
   user_id uuid not null references profiles(id) on delete cascade,
   role member_role not null default 'member',
@@ -155,25 +128,23 @@ create table if not exists workspace_members (
   updated_at timestamptz not null default now(),
   primary key (workspace_id, user_id)
 );
-create index if not exists workspace_members_user_id_idx on workspace_members (user_id);
+create index on workspace_members (user_id);
 
--- invite_codes
-create table if not exists invite_codes (
+create table invite_codes (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references workspaces(id) on delete cascade,
-  code text not null unique,
-  role member_role not null default 'member',
-  max_uses int,
+  code text not null unique,                     -- 8 chars, A-Z and 2-9, no look-alike letters
+  role member_role not null default 'member',    -- role given to whoever joins with it
+  max_uses int,                                  -- null = unlimited
   use_count int not null default 0,
-  expires_at timestamptz,
+  expires_at timestamptz,                        -- null = never
   revoked_at timestamptz,
   created_by uuid not null references profiles(id),
   created_at timestamptz not null default now()
 );
-create index if not exists invite_codes_workspace_id_idx on invite_codes (workspace_id);
+create index on invite_codes (workspace_id);
 
--- labels
-create table if not exists labels (
+create table labels (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references workspaces(id) on delete cascade,
   name text not null check (char_length(name) between 1 and 40),
@@ -184,12 +155,11 @@ create table if not exists labels (
   unique (workspace_id, name)
 );
 
--- files
-create table if not exists files (
+create table files (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references workspaces(id) on delete cascade,
   uploaded_by uuid not null references profiles(id),
-  storage_path text not null unique,
+  storage_path text not null unique,             -- {workspace_id}/{file_id}/{original_name}
   name text not null,
   mime_type text not null,
   size_bytes bigint not null check (size_bytes >= 0),
@@ -197,10 +167,9 @@ create table if not exists files (
   updated_at timestamptz not null default now(),
   deleted_at timestamptz
 );
-create index if not exists files_workspace_id_idx on files (workspace_id);
+create index on files (workspace_id);
 
--- tasks
-create table if not exists tasks (
+create table tasks (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references workspaces(id) on delete cascade,
   title text not null check (char_length(title) between 1 and 200),
@@ -212,7 +181,7 @@ create table if not exists tasks (
   label_id uuid references labels(id) on delete set null,
   created_by uuid not null references profiles(id),
   completed_at timestamptz,
-  reminder_minutes_before int,
+  reminder_minutes_before int,                   -- null = default reminder rules
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   deleted_at timestamptz,
@@ -220,13 +189,13 @@ create table if not exists tasks (
     to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(description,''))
   ) stored
 );
-create index if not exists tasks_workspace_status_idx on tasks (workspace_id, status);
-create index if not exists tasks_assignee_due_idx on tasks (assignee_id, due_at);
-create index if not exists tasks_workspace_updated_idx on tasks (workspace_id, updated_at);
-create index if not exists tasks_search_idx on tasks using gin (search);
-create index if not exists tasks_title_trgm on tasks using gin (title gin_trgm_ops);
+create index on tasks (workspace_id, status);
+create index on tasks (assignee_id, due_at);
+create index on tasks (workspace_id, updated_at);
+create index tasks_search_idx on tasks using gin (search);
+create index tasks_title_trgm on tasks using gin (title gin_trgm_ops);
 
--- tasks completed_at trigger function
+-- Keeps completed_at correct whenever status changes
 create or replace function tasks_completed_at() returns trigger
 language plpgsql as $$
 begin
@@ -237,13 +206,10 @@ begin
   end if;
   return new;
 end $$;
-
-drop trigger if exists tasks_completed_at_trg on tasks;
 create trigger tasks_completed_at_trg before insert or update on tasks
   for each row execute function tasks_completed_at();
 
--- subtasks
-create table if not exists subtasks (
+create table subtasks (
   id uuid primary key default gen_random_uuid(),
   task_id uuid not null references tasks(id) on delete cascade,
   title text not null check (char_length(title) between 1 and 200),
@@ -253,10 +219,9 @@ create table if not exists subtasks (
   updated_at timestamptz not null default now(),
   deleted_at timestamptz
 );
-create index if not exists subtasks_task_id_idx on subtasks (task_id);
+create index on subtasks (task_id);
 
--- task_comments
-create table if not exists task_comments (
+create table task_comments (
   id uuid primary key default gen_random_uuid(),
   task_id uuid not null references tasks(id) on delete cascade,
   author_id uuid not null references profiles(id),
@@ -265,10 +230,9 @@ create table if not exists task_comments (
   updated_at timestamptz not null default now(),
   deleted_at timestamptz
 );
-create index if not exists task_comments_task_created_idx on task_comments (task_id, created_at);
+create index on task_comments (task_id, created_at);
 
--- task_attachments
-create table if not exists task_attachments (
+create table task_attachments (
   task_id uuid not null references tasks(id) on delete cascade,
   file_id uuid not null references files(id) on delete cascade,
   created_at timestamptz not null default now(),
@@ -277,8 +241,7 @@ create table if not exists task_attachments (
   primary key (task_id, file_id)
 );
 
--- events
-create table if not exists events (
+create table events (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references workspaces(id) on delete cascade,
   title text not null check (char_length(title) between 1 and 200),
@@ -295,10 +258,9 @@ create table if not exists events (
   deleted_at timestamptz,
   check (ends_at >= starts_at)
 );
-create index if not exists events_workspace_starts_idx on events (workspace_id, starts_at);
+create index on events (workspace_id, starts_at);
 
--- event_attendees
-create table if not exists event_attendees (
+create table event_attendees (
   event_id uuid not null references events(id) on delete cascade,
   user_id uuid not null references profiles(id) on delete cascade,
   created_at timestamptz not null default now(),
@@ -307,12 +269,11 @@ create table if not exists event_attendees (
   primary key (event_id, user_id)
 );
 
--- channels
-create table if not exists channels (
+create table channels (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references workspaces(id) on delete cascade,
   kind channel_kind not null default 'channel',
-  name text,
+  name text,                                     -- null for direct messages
   description text not null default '',
   is_private boolean not null default false,
   created_by uuid not null references profiles(id),
@@ -322,18 +283,16 @@ create table if not exists channels (
   check (kind = 'dm' or name is not null)
 );
 
--- channel_members
-create table if not exists channel_members (
+create table channel_members (
   channel_id uuid not null references channels(id) on delete cascade,
   user_id uuid not null references profiles(id) on delete cascade,
   last_read_at timestamptz not null default now(),
   muted boolean not null default false,
   primary key (channel_id, user_id)
 );
-create index if not exists channel_members_user_id_idx on channel_members (user_id);
+create index on channel_members (user_id);
 
--- messages
-create table if not exists messages (
+create table messages (
   id uuid primary key default gen_random_uuid(),
   channel_id uuid not null references channels(id) on delete cascade,
   sender_id uuid not null references profiles(id),
@@ -345,10 +304,9 @@ create table if not exists messages (
   deleted_at timestamptz,
   check (char_length(body) > 0 or file_id is not null)
 );
-create index if not exists messages_channel_created_idx on messages (channel_id, created_at desc);
+create index on messages (channel_id, created_at desc);
 
--- folders
-create table if not exists folders (
+create table folders (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references workspaces(id) on delete cascade,
   parent_id uuid references folders(id) on delete cascade,
@@ -358,10 +316,9 @@ create table if not exists folders (
   updated_at timestamptz not null default now(),
   deleted_at timestamptz
 );
-create index if not exists folders_workspace_parent_idx on folders (workspace_id, parent_id);
+create index on folders (workspace_id, parent_id);
 
--- documents
-create table if not exists documents (
+create table documents (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references workspaces(id) on delete cascade,
   folder_id uuid references folders(id) on delete set null,
@@ -379,12 +336,11 @@ create table if not exists documents (
     to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(content_text,''))
   ) stored
 );
-create index if not exists documents_workspace_folder_idx on documents (workspace_id, folder_id);
-create index if not exists documents_search_idx on documents using gin (search);
-create index if not exists documents_title_trgm on documents using gin (title gin_trgm_ops);
+create index on documents (workspace_id, folder_id);
+create index documents_search_idx on documents using gin (search);
+create index documents_title_trgm on documents using gin (title gin_trgm_ops);
 
--- notifications
-create table if not exists notifications (
+create table notifications (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references profiles(id) on delete cascade,
   workspace_id uuid references workspaces(id) on delete cascade,
@@ -399,20 +355,19 @@ create table if not exists notifications (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
-create index if not exists notifications_user_created_idx on notifications (user_id, created_at desc);
-create index if not exists notifications_user_unread_idx on notifications (user_id) where read_at is null;
+create index on notifications (user_id, created_at desc);
+create index on notifications (user_id) where read_at is null;
 
--- device_tokens
-create table if not exists device_tokens (
+create table device_tokens (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references profiles(id) on delete cascade,
   token text not null unique,
   platform text not null check (platform in ('android','ios','windows','macos')),
   updated_at timestamptz not null default now()
 );
-create index if not exists device_tokens_user_id_idx on device_tokens (user_id);
+create index on device_tokens (user_id);
 
--- Create updated_at triggers for all tables
+-- updated_at triggers
 do $$
 declare t text;
 begin
@@ -421,13 +376,21 @@ begin
     'task_comments','task_attachments','events','event_attendees','channels','messages',
     'folders','documents','notifications','device_tokens'
   ] loop
-    execute format('drop trigger if exists %I_set_updated_at on %I', t, t);
     execute format('create trigger %I_set_updated_at before insert or update on %I
       for each row execute function set_updated_at()', t, t);
   end loop;
 end $$;
 
--- ===== 0003_helper_functions =====
+
+-- ---------------------------------------------------------------
+-- 0003_helper_functions.sql
+-- ---------------------------------------------------------------
+-- ============================================================================
+-- Migration 0003: Helper Functions (used by RLS)
+-- ============================================================================
+-- Security definer functions that read membership without triggering RLS recursion.
+-- Always set search_path for security.
+-- ============================================================================
 
 create or replace function is_member(ws uuid) returns boolean
 language sql stable security definer set search_path = public as $$
@@ -470,7 +433,16 @@ language sql stable security definer set search_path = public as $$
   select exists (select 1 from workspaces where id = ws and type = 'personal');
 $$;
 
--- ===== 0004_rls_policies =====
+
+-- ---------------------------------------------------------------
+-- 0004_rls_policies.sql
+-- ---------------------------------------------------------------
+-- ============================================================================
+-- Migration 0004: Row Level Security (RLS) Policies
+-- ============================================================================
+-- Enable RLS on every table and define policies.
+-- Express user client obeys these; admin client bypasses them.
+-- ============================================================================
 
 -- Enable RLS on all tables
 alter table profiles enable row level security;
@@ -493,93 +465,64 @@ alter table documents enable row level security;
 alter table notifications enable row level security;
 alter table device_tokens enable row level security;
 
--- Profiles policies
-drop policy if exists profiles_select on profiles;
+-- profiles: see yourself and anyone who shares a workspace with you; edit only yourself
 create policy profiles_select on profiles for select using (
   id = auth.uid() or exists (
     select 1 from workspace_members a join workspace_members b
       on a.workspace_id = b.workspace_id
     where a.user_id = auth.uid() and b.user_id = profiles.id)
 );
-
-drop policy if exists profiles_update on profiles;
 create policy profiles_update on profiles for update
   using (id = auth.uid()) with check (id = auth.uid());
 
--- Workspaces policies
-drop policy if exists ws_select on workspaces;
+-- workspaces
 create policy ws_select on workspaces for select using (is_member(id) or created_by = auth.uid());
-
-drop policy if exists ws_insert on workspaces;
 create policy ws_insert on workspaces for insert
   with check (created_by = auth.uid() and type = 'team');
-
-drop policy if exists ws_update on workspaces;
 create policy ws_update on workspaces for update
   using (is_admin(id)) with check (is_admin(id));
-
-drop policy if exists ws_delete on workspaces;
 create policy ws_delete on workspaces for delete using (is_admin(id) and type = 'team');
 
--- Workspace members policies
-drop policy if exists wm_select on workspace_members;
+-- workspace_members
 create policy wm_select on workspace_members for select using (
   is_member(workspace_id) and (
     is_full_member(workspace_id) or user_id = auth.uid() or role = 'admin')
 );
-
-drop policy if exists wm_update on workspace_members;
 create policy wm_update on workspace_members for update
   using (is_admin(workspace_id) and not is_personal(workspace_id))
   with check (is_admin(workspace_id));
-
-drop policy if exists wm_delete on workspace_members;
 create policy wm_delete on workspace_members for delete using (
   (is_admin(workspace_id) and not is_personal(workspace_id))
   or (user_id = auth.uid() and not is_personal(workspace_id))
 );
 
--- Invite codes policies
-drop policy if exists ic_all on invite_codes;
+-- invite_codes: admins only, team workspaces only
 create policy ic_all on invite_codes for all
   using (is_admin(workspace_id) and not is_personal(workspace_id))
   with check (is_admin(workspace_id) and not is_personal(workspace_id));
 
--- Labels policies
-drop policy if exists labels_select on labels;
+-- labels
 create policy labels_select on labels for select using (is_member(workspace_id));
-
-drop policy if exists labels_write on labels;
 create policy labels_write on labels for all
   using (is_full_member(workspace_id)) with check (is_full_member(workspace_id));
 
--- Files policies
-drop policy if exists files_select on files;
+-- files: full members see and create; guests see files on tasks assigned to them
 create policy files_select on files for select using (
   is_full_member(workspace_id)
   or exists (select 1 from task_attachments ta join tasks t on t.id = ta.task_id
              where ta.file_id = files.id and t.assignee_id = auth.uid())
 );
-
-drop policy if exists files_insert on files;
 create policy files_insert on files for insert
   with check (is_full_member(workspace_id) and uploaded_by = auth.uid());
-
-drop policy if exists files_update on files;
 create policy files_update on files for update
   using (is_admin(workspace_id) or uploaded_by = auth.uid());
 
--- Tasks policies
-drop policy if exists tasks_select on tasks;
+-- tasks
 create policy tasks_select on tasks for select using (
   is_full_member(workspace_id) or (is_member(workspace_id) and assignee_id = auth.uid())
 );
-
-drop policy if exists tasks_insert on tasks;
 create policy tasks_insert on tasks for insert
   with check (is_full_member(workspace_id) and created_by = auth.uid());
-
-drop policy if exists tasks_update on tasks;
 create policy tasks_update on tasks for update using (
   is_admin(workspace_id)
   or (is_full_member(workspace_id) and (created_by = auth.uid() or assignee_id = auth.uid()))
@@ -588,596 +531,544 @@ create policy tasks_update on tasks for update using (
   is_member(workspace_id)
 );
 
--- Tasks guard function
+-- tasks_guard: enforces delete permission, guest restrictions, and workspace move rules
 create or replace function tasks_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
 begin
   if new.deleted_at is not null and old.deleted_at is null then
     if not (is_admin(old.workspace_id) or old.created_by = auth.uid()) then
-      raise exception 'permission denied';
+      raise exception 'not allowed to delete this task' using errcode = '42501';
     end if;
   end if;
-  if new.workspace_id <> old.workspace_id then
-    raise exception 'use move_task_to_workspace()';
-  end if;
-  if is_member(old.workspace_id) and member_role_in(old.workspace_id) = 'guest'
-     and old.assignee_id = auth.uid() then
-    if new.status <> old.status and
-       new.title = old.title and
-       new.description = old.description and
-       new.priority = old.priority and
-       new.due_at is not distinct from old.due_at and
-       new.assignee_id = old.assignee_id and
-       new.label_id is not distinct from old.label_id and
-       new.reminder_minutes_before is not distinct from old.reminder_minutes_before and
-       new.deleted_at is null then
-      return new;
-    else
-      raise exception 'guests can only change status';
+  if member_role_in(old.workspace_id) = 'guest' then
+    if new.title <> old.title or new.description <> old.description or new.priority <> old.priority
+       or new.due_at is distinct from old.due_at or new.assignee_id is distinct from old.assignee_id
+       or new.workspace_id <> old.workspace_id then
+      raise exception 'guests can only change task status' using errcode = '42501';
     end if;
+  end if;
+  if new.workspace_id <> old.workspace_id
+     and coalesce(current_setting('planpal.moving', true), '') <> '1' then
+    raise exception 'use move_task_to_workspace()' using errcode = '42501';
   end if;
   return new;
 end $$;
-
-drop trigger if exists tasks_guard_trg on tasks;
 create trigger tasks_guard_trg before update on tasks
   for each row execute function tasks_guard();
 
--- Subtasks policies
-drop policy if exists subtasks_all on subtasks;
-create policy subtasks_all on subtasks for all
-  using (is_member(task_workspace(task_id)))
-  with check (is_member(task_workspace(task_id)));
-
--- Task comments policies
-drop policy if exists tc_select on task_comments;
-create policy tc_select on task_comments for select
-  using (is_member(task_workspace(task_id)));
-
-drop policy if exists tc_insert on task_comments;
-create policy tc_insert on task_comments for insert
-  with check (is_member(task_workspace(task_id)) and author_id = auth.uid());
-
-drop policy if exists tc_update on task_comments;
-create policy tc_update on task_comments for update
-  using (author_id = auth.uid() or is_admin(task_workspace(task_id)));
-
--- Task attachments policies
-drop policy if exists ta_all on task_attachments;
-create policy ta_all on task_attachments for all
-  using (is_member(task_workspace(task_id)))
-  with check (is_member(task_workspace(task_id)));
-
--- Events policies
-drop policy if exists events_all on events;
-create policy events_all on events for all
-  using (is_member(workspace_id))
-  with check (is_member(workspace_id) and created_by = auth.uid());
-
--- Event attendees policies
-drop policy if exists ea_all on event_attendees;
-create policy ea_all on event_attendees for all
-  using (exists (select 1 from events e where e.id = event_id and is_member(e.workspace_id)))
-  with check (exists (select 1 from events e where e.id = event_id and is_member(e.workspace_id)));
-
--- Channels policies
-drop policy if exists ch_select on channels;
-create policy ch_select on channels for select using (
-  (is_member(workspace_id) and not is_private) or is_channel_member(id)
+-- subtasks
+create policy subtasks_select on subtasks for select using (
+  exists (select 1 from tasks t where t.id = subtasks.task_id));
+create policy subtasks_write on subtasks for all using (
+  exists (select 1 from tasks t where t.id = subtasks.task_id
+          and (is_full_member(t.workspace_id) or t.assignee_id = auth.uid()))
+) with check (
+  exists (select 1 from tasks t where t.id = subtasks.task_id
+          and (is_full_member(t.workspace_id) or t.assignee_id = auth.uid()))
 );
 
-drop policy if exists ch_insert on channels;
-create policy ch_insert on channels for insert
-  with check (is_member(workspace_id) and created_by = auth.uid() and not is_personal(workspace_id));
+-- task_comments
+create policy comments_select on task_comments for select using (
+  exists (select 1 from tasks t where t.id = task_comments.task_id));
+create policy comments_insert on task_comments for insert with check (
+  author_id = auth.uid()
+  and exists (select 1 from tasks t where t.id = task_comments.task_id));
+create policy comments_update on task_comments for update using (
+  author_id = auth.uid() or is_admin(task_workspace(task_id)));
 
-drop policy if exists ch_update on channels;
+-- task_attachments
+create policy attach_select on task_attachments for select using (
+  exists (select 1 from tasks t where t.id = task_attachments.task_id));
+create policy attach_write on task_attachments for all using (
+  exists (select 1 from tasks t where t.id = task_attachments.task_id
+          and (is_full_member(t.workspace_id)))
+) with check (
+  exists (select 1 from tasks t where t.id = task_attachments.task_id
+          and (is_full_member(t.workspace_id)))
+);
+
+-- events
+create policy events_select on events for select using (
+  is_full_member(workspace_id)
+  or exists (select 1 from event_attendees ea
+             where ea.event_id = events.id and ea.user_id = auth.uid() and ea.deleted_at is null)
+);
+create policy events_write on events for all
+  using (is_full_member(workspace_id)) with check (is_full_member(workspace_id));
+
+-- event_attendees
+create policy attendees_select on event_attendees for select using (
+  exists (select 1 from events e where e.id = event_attendees.event_id));
+create policy attendees_write on event_attendees for all using (
+  exists (select 1 from events e where e.id = event_attendees.event_id
+          and is_full_member(e.workspace_id))
+) with check (
+  exists (select 1 from events e where e.id = event_attendees.event_id
+          and is_full_member(e.workspace_id))
+);
+
+-- channels and chat (team workspaces only)
+create policy ch_select on channels for select using (
+  (kind = 'channel' and is_full_member(workspace_id) and not is_private)
+  or is_channel_member(id)
+);
+create policy ch_insert on channels for insert with check (
+  is_full_member(workspace_id) and not is_personal(workspace_id) and created_by = auth.uid()
+);
 create policy ch_update on channels for update
   using (is_admin(workspace_id) or created_by = auth.uid());
 
--- Channel members policies
-drop policy if exists cm_all on channel_members;
-create policy cm_all on channel_members for all
-  using (is_member(channel_workspace(channel_id)))
-  with check (is_member(channel_workspace(channel_id)));
+-- channel_members
+create policy cm_select on channel_members for select using (
+  user_id = auth.uid() or is_channel_member(channel_id));
+create policy cm_insert on channel_members for insert with check (
+  (user_id = auth.uid() and exists (select 1 from channels c where c.id = channel_id
+     and c.kind = 'channel' and not c.is_private and is_full_member(c.workspace_id)))
+  or is_admin(channel_workspace(channel_id))
+  or exists (select 1 from channels c where c.id = channel_id and c.created_by = auth.uid())
+);
+create policy cm_update on channel_members for update using (user_id = auth.uid());
+create policy cm_delete on channel_members for delete using (
+  user_id = auth.uid() or is_admin(channel_workspace(channel_id)));
 
--- Messages policies
-drop policy if exists msg_select on messages;
-create policy msg_select on messages for select
-  using (is_channel_member(channel_id));
+-- messages
+create policy msg_select on messages for select using (
+  is_channel_member(channel_id)
+  or exists (select 1 from channels c where c.id = messages.channel_id
+             and c.kind = 'channel' and not c.is_private and is_full_member(c.workspace_id)));
+create policy msg_insert on messages for insert with check (
+  sender_id = auth.uid() and is_channel_member(channel_id));
+create policy msg_update on messages for update using (sender_id = auth.uid());
 
-drop policy if exists msg_insert on messages;
-create policy msg_insert on messages for insert
-  with check (is_channel_member(channel_id) and sender_id = auth.uid());
-
-drop policy if exists msg_update on messages;
-create policy msg_update on messages for update
-  using (sender_id = auth.uid());
-
--- Folders policies
-drop policy if exists folders_all on folders;
+-- folders and documents: full members only
 create policy folders_all on folders for all
-  using (is_member(workspace_id))
-  with check (is_member(workspace_id) and created_by = auth.uid());
-
--- Documents policies
-drop policy if exists docs_select on documents;
-create policy docs_select on documents for select using (is_member(workspace_id));
-
-drop policy if exists docs_write on documents;
-create policy docs_write on documents for all
-  using (is_full_member(workspace_id))
+  using (is_full_member(workspace_id)) with check (is_full_member(workspace_id));
+create policy docs_select on documents for select using (is_full_member(workspace_id));
+create policy docs_insert on documents for insert
   with check (is_full_member(workspace_id) and created_by = auth.uid());
+create policy docs_update on documents for update using (
+  is_admin(workspace_id) or created_by = auth.uid());
 
--- Notifications policies
-drop policy if exists notif_all on notifications;
-create policy notif_all on notifications for all
-  using (user_id = auth.uid())
-  with check (user_id = auth.uid());
-
--- Device tokens policies
-drop policy if exists dt_all on device_tokens;
+-- notifications and device tokens: strictly your own
+create policy notif_select on notifications for select using (user_id = auth.uid());
+create policy notif_update on notifications for update using (user_id = auth.uid());
 create policy dt_all on device_tokens for all
-  using (user_id = auth.uid())
-  with check (user_id = auth.uid());
+  using (user_id = auth.uid()) with check (user_id = auth.uid());
 
--- ===== 0005_triggers_functions =====
 
--- Create profile and personal workspace on signup
-create or replace function create_profile_and_workspace() returns trigger
+-- ---------------------------------------------------------------
+-- 0005_triggers_functions.sql
+-- ---------------------------------------------------------------
+-- ============================================================================
+-- Migration 0005: Triggers and Business Logic Functions
+-- ============================================================================
+-- Handles: new user setup, workspace creation, member joining, last admin protection,
+-- join_workspace, move_task_to_workspace, get_or_create_dm
+-- ============================================================================
+
+-- 6.1 New user: create profile, Personal workspace and membership
+create or replace function handle_new_user() returns trigger
 language plpgsql security definer set search_path = public as $$
-declare
-  ws_id uuid;
+declare ws uuid;
 begin
-  insert into profiles (id, email, full_name)
-  values (new.id, new.email, coalesce(new.raw_user_meta_data->>'full_name', ''))
-  on conflict (id) do nothing;
+  insert into profiles (id, email, full_name, avatar_url)
+  values (
+    new.id, new.email,
+    coalesce(new.raw_user_meta_data->>'full_name', new.raw_user_meta_data->>'name', ''),
+    new.raw_user_meta_data->>'avatar_url');
 
   insert into workspaces (name, type, created_by)
-  values ('Personal', 'personal', new.id)
-  returning id into ws_id;
+  values ('Personal', 'personal', new.id) returning id into ws;
 
-  update profiles set personal_workspace_id = ws_id where id = new.id;
-
-  insert into workspace_members (workspace_id, user_id, role)
-  values (ws_id, new.id, 'admin');
-
+  insert into workspace_members (workspace_id, user_id, role) values (ws, new.id, 'admin');
+  update profiles set personal_workspace_id = ws where id = new.id;
   return new;
 end $$;
+create trigger on_auth_user_created after insert on auth.users
+  for each row execute function handle_new_user();
 
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created
-  after insert on auth.users
-  for each row execute function create_profile_and_workspace();
-
--- Create admin membership and #general channel on team workspace creation
-create or replace function setup_team_workspace() returns trigger
+-- 6.2 New team workspace: creator becomes admin, #general channel is created
+create or replace function handle_new_team_workspace() returns trigger
 language plpgsql security definer set search_path = public as $$
-declare
-  gen_ch_id uuid;
+declare ch uuid;
 begin
   if new.type = 'team' then
     insert into workspace_members (workspace_id, user_id, role)
-    values (new.id, new.created_by, 'admin')
-    on conflict do nothing;
-
-    insert into channels (workspace_id, kind, name, description, is_private, created_by)
-    values (new.id, 'channel', 'general', 'Default channel for everyone', false, new.created_by)
-    returning id into gen_ch_id;
-
-    insert into channel_members (channel_id, user_id)
-    values (gen_ch_id, new.created_by);
+    values (new.id, new.created_by, 'admin');
+    insert into channels (workspace_id, kind, name, description, created_by)
+    values (new.id, 'channel', 'general', 'Default workspace discussion hub', new.created_by)
+    returning id into ch;
+    insert into channel_members (channel_id, user_id) values (ch, new.created_by);
   end if;
   return new;
 end $$;
+create trigger on_workspace_created after insert on workspaces
+  for each row execute function handle_new_team_workspace();
 
-drop trigger if exists setup_team_workspace_trg on workspaces;
-create trigger setup_team_workspace_trg
-  after insert on workspaces
-  for each row execute function setup_team_workspace();
+-- 6.3 Someone joins a team: add them to #general (guests are not auto-added)
+create or replace function handle_member_joined() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if new.role in ('admin','member') then
+    insert into channel_members (channel_id, user_id)
+    select c.id, new.user_id from channels c
+    where c.workspace_id = new.workspace_id and c.kind = 'channel' and c.name = 'general'
+    on conflict do nothing;
+  end if;
+  return new;
+end $$;
+create trigger on_member_joined after insert on workspace_members
+  for each row execute function handle_member_joined();
 
--- Last admin protection
+-- 6.4 Never remove or demote the last admin of a team
 create or replace function protect_last_admin() returns trigger
 language plpgsql security definer set search_path = public as $$
-declare
-  admin_count int;
+declare remaining int;
 begin
-  if tg_op = 'DELETE' or (tg_op = 'UPDATE' and new.role <> 'admin') then
-    select count(*) into admin_count
-    from workspace_members
-    where workspace_id = coalesce(new.workspace_id, old.workspace_id)
-      and role = 'admin';
-
-    if admin_count <= 1 then
-      raise exception using
-        errcode = 'P0001',
-        message = 'cannot remove or demote the last admin';
+  if (tg_op = 'DELETE' and old.role = 'admin')
+     or (tg_op = 'UPDATE' and old.role = 'admin' and new.role <> 'admin') then
+    select count(*) into remaining from workspace_members
+      where workspace_id = old.workspace_id and role = 'admin' and user_id <> old.user_id;
+    if remaining = 0 and exists (select 1 from workspaces w where w.id = old.workspace_id
+                                 and w.type = 'team' and w.deleted_at is null) then
+      raise exception 'a team workspace must keep at least one admin' using errcode = 'P0001';
     end if;
   end if;
   return coalesce(new, old);
 end $$;
-
-drop trigger if exists protect_last_admin_trg on workspace_members;
-create trigger protect_last_admin_trg
-  before update or delete on workspace_members
+create trigger protect_last_admin_trg before update or delete on workspace_members
   for each row execute function protect_last_admin();
 
--- Auto-add new team members to #general
-create or replace function add_member_to_general() returns trigger
-language plpgsql security definer set search_path = public as $$
-declare
-  gen_ch_id uuid;
-  ws_type workspace_type;
-begin
-  select type into ws_type from workspaces where id = new.workspace_id;
-  if ws_type = 'team' then
-    select id into gen_ch_id from channels
-    where workspace_id = new.workspace_id and kind = 'channel' and name = 'general'
-    limit 1;
-
-    if gen_ch_id is not null then
-      insert into channel_members (channel_id, user_id)
-      values (gen_ch_id, new.user_id)
-      on conflict do nothing;
-    end if;
-  end if;
-  return new;
-end $$;
-
-drop trigger if exists add_member_to_general_trg on workspace_members;
-create trigger add_member_to_general_trg
-  after insert on workspace_members
-  for each row execute function add_member_to_general();
-
--- Join workspace function
+-- 6.5 Join with an invite code (atomic). Called through Express as the user.
 create or replace function join_workspace(p_code text) returns uuid
 language plpgsql security definer set search_path = public as $$
-declare
-  inv record;
-  ws_id uuid;
+declare ic invite_codes%rowtype;
 begin
-  select * into inv from invite_codes where code = p_code;
-
-  if not found then
-    raise exception using errcode = 'P0002', message = 'INVALID_CODE';
-  end if;
-  if inv.revoked_at is not null then
-    raise exception using errcode = 'P0002', message = 'CODE_REVOKED';
-  end if;
-  if inv.expires_at is not null and inv.expires_at < now() then
-    raise exception using errcode = 'P0002', message = 'CODE_EXPIRED';
-  end if;
-  if inv.max_uses is not null and inv.use_count >= inv.max_uses then
-    raise exception using errcode = 'P0002', message = 'CODE_USED_UP';
-  end if;
-  if exists (select 1 from workspace_members where workspace_id = inv.workspace_id and user_id = auth.uid()) then
-    raise exception using errcode = 'P0002', message = 'ALREADY_MEMBER';
-  end if;
-
-  ws_id := inv.workspace_id;
+  if auth.uid() is null then raise exception 'not signed in' using errcode = '28000'; end if;
+  select * into ic from invite_codes where code = upper(trim(p_code)) for update;
+  if not found then raise exception 'INVALID_CODE' using errcode = 'P0002'; end if;
+  if ic.revoked_at is not null then raise exception 'CODE_REVOKED' using errcode = 'P0002'; end if;
+  if ic.expires_at is not null and ic.expires_at < now() then
+    raise exception 'CODE_EXPIRED' using errcode = 'P0002'; end if;
+  if ic.max_uses is not null and ic.use_count >= ic.max_uses then
+    raise exception 'CODE_USED_UP' using errcode = 'P0002'; end if;
+  if exists (select 1 from workspace_members
+             where workspace_id = ic.workspace_id and user_id = auth.uid()) then
+    raise exception 'ALREADY_MEMBER' using errcode = 'P0002'; end if;
 
   insert into workspace_members (workspace_id, user_id, role)
-  values (ws_id, auth.uid(), inv.role);
-
-  update invite_codes set use_count = use_count + 1 where id = inv.id;
-
-  return ws_id;
+  values (ic.workspace_id, auth.uid(), ic.role);
+  update invite_codes set use_count = use_count + 1 where id = ic.id;
+  return ic.workspace_id;
 end $$;
 
--- Move task to workspace function
+-- 6.6 Move a task from one workspace to another (for example Personal to Team)
 create or replace function move_task_to_workspace(p_task uuid, p_target uuid) returns void
 language plpgsql security definer set search_path = public as $$
-declare
-  old_ws uuid;
+declare t tasks%rowtype;
 begin
-  select workspace_id into old_ws from tasks where id = p_task;
-  if not is_admin(old_ws) or not is_admin(p_target) then
-    raise exception 'permission denied';
+  select * into t from tasks where id = p_task and deleted_at is null for update;
+  if not found then raise exception 'TASK_NOT_FOUND' using errcode = 'P0002'; end if;
+  if not (t.created_by = auth.uid() or is_admin(t.workspace_id)) then
+    raise exception 'not allowed' using errcode = '42501'; end if;
+  if not exists (select 1 from workspace_members where workspace_id = p_target
+                 and user_id = auth.uid() and role in ('admin','member')) then
+    raise exception 'not a member of the target workspace' using errcode = '42501'; end if;
+
+  perform set_config('planpal.moving', '1', true);
+  update tasks set
+    workspace_id = p_target,
+    label_id = null,
+    assignee_id = case when exists (select 1 from workspace_members
+        where workspace_id = p_target and user_id = t.assignee_id) then t.assignee_id else null end
+  where id = p_task;
+  update files set workspace_id = p_target
+  where id in (select file_id from task_attachments where task_id = p_task);
+end $$;
+
+-- 6.7 Open or create a direct message channel between two members of a team
+create or replace function get_or_create_dm(p_workspace uuid, p_other uuid) returns uuid
+language plpgsql security definer set search_path = public as $$
+declare ch uuid;
+begin
+  if not (is_full_member(p_workspace) and exists (select 1 from workspace_members
+      where workspace_id = p_workspace and user_id = p_other and role in ('admin','member'))) then
+    raise exception 'both people must be members of this workspace' using errcode = '42501';
   end if;
-  update tasks set workspace_id = p_target where id = p_task;
+  select c.id into ch from channels c
+   where c.workspace_id = p_workspace and c.kind = 'dm'
+     and exists (select 1 from channel_members m where m.channel_id = c.id and m.user_id = auth.uid())
+     and exists (select 1 from channel_members m where m.channel_id = c.id and m.user_id = p_other)
+   limit 1;
+  if ch is null then
+    insert into channels (workspace_id, kind, is_private, created_by)
+    values (p_workspace, 'dm', true, auth.uid()) returning id into ch;
+    insert into channel_members (channel_id, user_id) values (ch, auth.uid()), (ch, p_other);
+  end if;
+  return ch;
 end $$;
 
--- Claim unpushed notifications (for push service)
-create or replace function claim_unpushed_notifications(p_limit int default 100)
-returns table (
-  id uuid,
-  user_id uuid,
-  title text,
-  body text,
-  entity_type text,
-  entity_id uuid,
-  workspace_id uuid
-)
-language plpgsql security definer set search_path = public as $$
-begin
-  return query
-  update notifications n
-  set pushed_at = now()
-  where n.id in (
-    select n2.id from notifications n2
-    where n2.pushed_at is null
-    order by n2.created_at
-    limit p_limit
-    for update skip locked
-  )
-  returning n.id, n.user_id, n.title, n.body, n.entity_type, n.entity_id, n.workspace_id;
-end $$;
 
--- ===== 0006_search =====
+-- ---------------------------------------------------------------
+-- 0006_search.sql
+-- ---------------------------------------------------------------
+-- ============================================================================
+-- Migration 0006: Global Search
+-- ============================================================================
+-- Searches tasks, documents, and people. RLS applies (security invoker).
+-- ============================================================================
 
--- Combined search function
-create or replace function search_all(
-  p_workspace_id uuid,
-  p_query text,
-  p_limit int default 20
-)
-returns table (
-  result_type text,
-  id uuid,
-  title text,
-  snippet text,
-  rank real
-)
-language plpgsql security definer set search_path = public as $$
-begin
-  return query
-  select 'task'::text, t.id, t.title, left(t.description, 100), ts_rank(t.search, websearch_to_tsquery('simple', p_query))
-  from tasks t
-  where t.workspace_id = p_workspace_id
-    and t.deleted_at is null
-    and t.search @@ websearch_to_tsquery('simple', p_query)
-  order by ts_rank(t.search, websearch_to_tsquery('simple', p_query)) desc
-  limit p_limit;
-end $$;
-
--- Fuzzy title search for tasks
-create or replace function fuzzy_search_tasks(
-  p_workspace_id uuid,
-  p_query text,
-  p_limit int default 10
-)
-returns table (
-  id uuid,
-  title text,
-  similarity_score real
-)
-language sql stable security definer set search_path = public as $$
-  select t.id, t.title, similarity(t.title, p_query) as similarity_score
-  from tasks t
-  where t.workspace_id = p_workspace_id
-    and t.deleted_at is null
-    and t.title % p_query
-  order by similarity_score desc
+create or replace function search_all(p_query text, p_workspace uuid default null, p_limit int default 20)
+returns table (kind text, id uuid, workspace_id uuid, title text, subtitle text, score real, at timestamptz)
+language sql stable security invoker set search_path = public as $$
+  with q as (select websearch_to_tsquery('simple', p_query) as tsq, p_query as raw)
+  select 'task', t.id, t.workspace_id, t.title, t.priority::text,
+         (ts_rank(t.search, q.tsq) + similarity(t.title, q.raw))::real, t.due_at
+    from tasks t, q
+   where t.deleted_at is null
+     and (p_workspace is null or t.workspace_id = p_workspace)
+     and (t.search @@ q.tsq or t.title % q.raw or t.title ilike '%' || q.raw || '%')
+  union all
+  select 'document', d.id, d.workspace_id, d.title, d.kind::text,
+         (ts_rank(d.search, q.tsq) + similarity(d.title, q.raw))::real, d.updated_at
+    from documents d, q
+   where d.deleted_at is null
+     and (p_workspace is null or d.workspace_id = p_workspace)
+     and (d.search @@ q.tsq or d.title % q.raw or d.title ilike '%' || q.raw || '%')
+  union all
+  select 'person', p.id, wm.workspace_id, p.full_name, p.email,
+         similarity(p.full_name, q.raw)::real, null
+    from profiles p
+    join workspace_members wm on wm.user_id = p.id, q
+   where p.deleted_at is null
+     and (p_workspace is null or wm.workspace_id = p_workspace)
+     and (p.full_name ilike '%' || q.raw || '%' or p.email ilike '%' || q.raw || '%')
+  order by 6 desc
   limit p_limit;
 $$;
 
--- ===== 0007_analytics =====
 
--- Task counts by status
-create or replace function task_counts_by_status(p_workspace_id uuid)
-returns table (status task_status, count bigint)
-language sql stable security definer set search_path = public as $$
-  select t.status, count(*)
-  from tasks t
-  where t.workspace_id = p_workspace_id and t.deleted_at is null
-  group by t.status;
+-- ---------------------------------------------------------------
+-- 0007_analytics.sql
+-- ---------------------------------------------------------------
+-- ============================================================================
+-- Migration 0007: Analytics Functions
+-- ============================================================================
+-- All functions are security invoker (RLS applies).
+-- Analytics are per workspace.
+-- ============================================================================
+
+-- Summary cards on the Analytics page and Home "Overview"
+create or replace function analytics_summary(p_workspace uuid, p_from timestamptz, p_to timestamptz)
+returns table (
+  completed int, in_progress int, overdue int,
+  avg_completion_days numeric, completed_prev int,
+  on_time_rate numeric
+) language sql stable security invoker set search_path = public as $$
+  with cur as (
+    select * from tasks where workspace_id = p_workspace and deleted_at is null),
+  prev as (
+    select count(*)::int c from cur
+     where status = 'completed'
+       and completed_at >= p_from - (p_to - p_from) and completed_at < p_from)
+  select
+    count(*) filter (where status = 'completed' and completed_at between p_from and p_to)::int,
+    count(*) filter (where status = 'in_progress')::int,
+    count(*) filter (where status <> 'completed' and due_at < now())::int,
+    round(avg(extract(epoch from (completed_at - created_at)) / 86400.0)
+      filter (where status = 'completed' and completed_at between p_from and p_to)::numeric, 1),
+    (select c from prev),
+    round(100.0 * count(*) filter (where status = 'completed'
+        and completed_at between p_from and p_to and (due_at is null or completed_at <= due_at))
+      / nullif(count(*) filter (where status = 'completed'
+        and completed_at between p_from and p_to), 0), 0)
+  from cur;
 $$;
 
--- Overdue tasks count
-create or replace function overdue_tasks_count(p_workspace_id uuid)
-returns bigint
-language sql stable security definer set search_path = public as $$
-  select count(*)
-  from tasks t
-  where t.workspace_id = p_workspace_id
-    and t.deleted_at is null
-    and t.status <> 'completed'
-    and t.due_at < now();
+-- Weekly Task Output bars: completed tasks per weekday
+create or replace function analytics_weekly(p_workspace uuid, p_from timestamptz, p_to timestamptz)
+returns table (weekday int, completed int)
+language sql stable security invoker set search_path = public as $$
+  select d.dow, count(t.id)::int
+    from generate_series(1, 7) as d(dow)
+    left join tasks t
+      on extract(isodow from t.completed_at) = d.dow
+     and t.workspace_id = p_workspace and t.deleted_at is null
+     and t.status = 'completed' and t.completed_at between p_from and p_to
+   group by d.dow order by d.dow;
 $$;
 
--- ===== 0008_pg_cron_reminders =====
+-- Category Mix donut: completed-or-open tasks by label
+create or replace function analytics_categories(p_workspace uuid, p_from timestamptz, p_to timestamptz)
+returns table (label text, color text, total int)
+language sql stable security invoker set search_path = public as $$
+  select coalesce(l.name, 'No label'), coalesce(l.color, '#94A3B8'), count(*)::int
+    from tasks t left join labels l on l.id = t.label_id
+   where t.workspace_id = p_workspace and t.deleted_at is null
+     and t.created_at between p_from and p_to
+   group by 1, 2 order by 3 desc;
+$$;
 
--- Create deadline notifications for tasks due within 24 hours
+-- Home "Overview" line chart: tasks completed per day
+create or replace function analytics_daily(p_workspace uuid, p_from date, p_to date)
+returns table (day date, completed int)
+language sql stable security invoker set search_path = public as $$
+  select g::date, count(t.id)::int
+    from generate_series(p_from, p_to, interval '1 day') g
+    left join tasks t on t.completed_at::date = g::date
+     and t.workspace_id = p_workspace and t.deleted_at is null and t.status = 'completed'
+   group by 1 order by 1;
+$$;
+
+-- Productive streak: consecutive days, ending today or yesterday, with at least one completed task
+create or replace function analytics_streak(p_workspace uuid) returns int
+language sql stable security invoker set search_path = public as $$
+  with days as (
+    select distinct completed_at::date d from tasks
+     where workspace_id = p_workspace and deleted_at is null and status = 'completed'),
+  islands as (
+    select d, d - (row_number() over (order by d))::int as grp from days)
+  select coalesce((select count(*)::int from islands
+          where grp = (select grp from islands order by d desc limit 1)
+            and (select max(d) from islands) >= current_date - 1), 0);
+$$;
+
+
+-- ---------------------------------------------------------------
+-- 0008_pg_cron_reminders.sql
+-- ---------------------------------------------------------------
+-- ============================================================================
+-- Migration 0008: Scheduled Reminders and Push (pg_cron + pg_net)
+-- ============================================================================
+-- Runs every 5 minutes inside Supabase (always on).
+-- Creates notification rows, then wakes Express to send pushes.
+-- Free-tier safe: no timers inside Express.
+-- ============================================================================
+
+-- Create deadline and event reminder notifications
 create or replace function create_deadline_notifications() returns void
 language plpgsql security definer set search_path = public as $$
 begin
+  -- due within 24 hours
   insert into notifications (user_id, workspace_id, type, title, body, entity_type, entity_id, dedupe_key)
-  select
-    t.assignee_id,
-    t.workspace_id,
-    'deadline_approaching'::notification_type,
-    'Task due soon: ' || t.title,
-    'Due at ' || to_char(t.due_at, 'YYYY-MM-DD HH24:MI'),
-    'task',
-    t.id,
-    'deadline_' || t.id::text
-  from tasks t
-  where t.assignee_id is not null
-    and t.status <> 'completed'
-    and t.due_at between now() and now() + interval '24 hours'
-    and t.deleted_at is null
+  select t.assignee_id, t.workspace_id, 'deadline_approaching', 'Deadline approaching',
+         'Task "' || t.title || '" is due soon.', 'task', t.id,
+         'deadline24:' || t.id || ':' || extract(epoch from t.due_at)::bigint
+    from tasks t
+   where t.deleted_at is null and t.status <> 'completed' and t.assignee_id is not null
+     and t.due_at between now() and now() + interval '24 hours'
+  on conflict (dedupe_key) do nothing;
+
+  -- overdue
+  insert into notifications (user_id, workspace_id, type, title, body, entity_type, entity_id, dedupe_key)
+  select t.assignee_id, t.workspace_id, 'task_overdue', 'Task overdue',
+         'Task "' || t.title || '" is overdue.', 'task', t.id,
+         'overdue:' || t.id || ':' || extract(epoch from t.due_at)::bigint
+    from tasks t
+   where t.deleted_at is null and t.status <> 'completed' and t.assignee_id is not null
+     and t.due_at < now()
+  on conflict (dedupe_key) do nothing;
+
+  -- event reminders for attendees
+  insert into notifications (user_id, workspace_id, type, title, body, entity_type, entity_id, dedupe_key)
+  select ea.user_id, e.workspace_id, 'event_reminder', e.title,
+         'Starts at ' || to_char(e.starts_at at time zone 'UTC', 'HH24:MI') || ' UTC',
+         'event', e.id, 'event:' || e.id || ':' || ea.user_id || ':' || extract(epoch from e.starts_at)::bigint
+    from events e join event_attendees ea on ea.event_id = e.id and ea.deleted_at is null
+   where e.deleted_at is null
+     and e.starts_at between now() and now() + make_interval(mins => e.reminder_minutes_before)
   on conflict (dedupe_key) do nothing;
 end $$;
 
--- Create overdue notifications for tasks past due
-create or replace function create_overdue_notifications() returns void
+-- Add push_attempts column to notifications
+alter table notifications add column if not exists push_attempts int not null default 0;
+
+-- Claims a batch of unsent notifications (two workers never send the same one)
+create or replace function claim_unpushed_notifications(p_limit int default 100)
+returns setof notifications
+language sql security definer set search_path = public as $$
+  update notifications n
+     set pushed_at = now(), push_attempts = n.push_attempts + 1
+   where n.id in (
+     select id from notifications
+      where pushed_at is null and push_attempts < 3
+        and created_at > now() - interval '1 day'
+      order by created_at
+      for update skip locked
+      limit p_limit)
+  returning n.*;
+$$;
+revoke all on function claim_unpushed_notifications(int) from public, anon, authenticated;
+grant execute on function claim_unpushed_notifications(int) to service_role;
+
+-- Enable pg_net for calling Express
+create extension if not exists pg_net;
+
+-- Wakes Render server and tells it to send pending pushes
+create or replace function run_reminders_and_push() returns void
+language plpgsql security definer set search_path = public as $$
+declare api_url text; cron_secret text;
+begin
+  perform create_deadline_notifications();
+
+  select decrypted_secret into api_url from vault.decrypted_secrets where name = 'planpal_api_url';
+  select decrypted_secret into cron_secret from vault.decrypted_secrets where name = 'planpal_cron_secret';
+  if api_url is not null and cron_secret is not null then
+    perform net.http_post(
+      url := api_url || '/internal/push/run',
+      headers := jsonb_build_object('Content-Type', 'application/json', 'X-Cron-Secret', cron_secret),
+      body := '{}'::jsonb,
+      timeout_milliseconds := 60000);
+  end if;
+end $$;
+
+-- Schedule: run every 5 minutes
+select cron.schedule('planpal-reminders', '*/5 * * * *', $$select run_reminders_and_push()$$);
+
+-- Weekly cleanup (Sunday 03:00 UTC) to stay inside free-tier storage
+create or replace function purge_old_rows() returns void
 language plpgsql security definer set search_path = public as $$
 begin
-  insert into notifications (user_id, workspace_id, type, title, body, entity_type, entity_id, dedupe_key)
-  select
-    t.assignee_id,
-    t.workspace_id,
-    'task_overdue'::notification_type,
-    'Task overdue: ' || t.title,
-    'Was due at ' || to_char(t.due_at, 'YYYY-MM-DD HH24:MI'),
-    'task',
-    t.id,
-    'overdue_' || t.id::text
-  from tasks t
-  where t.assignee_id is not null
-    and t.status <> 'completed'
-    and t.due_at < now()
-    and t.deleted_at is null
-  on conflict (dedupe_key) do nothing;
+  delete from notifications where created_at < now() - interval '90 days';
+  delete from messages       where deleted_at < now() - interval '60 days';
+  delete from task_comments  where deleted_at < now() - interval '60 days';
+  delete from subtasks       where deleted_at < now() - interval '60 days';
+  delete from tasks          where deleted_at < now() - interval '60 days';
+  delete from events         where deleted_at < now() - interval '60 days';
 end $$;
+select cron.schedule('planpal-cleanup', '0 3 * * 0', $$select purge_old_rows()$$);
 
--- Create event reminder notifications
-create or replace function create_event_reminders() returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  insert into notifications (user_id, workspace_id, type, title, body, entity_type, entity_id, dedupe_key)
-  select
-    ea.user_id,
-    e.workspace_id,
-    'event_reminder'::notification_type,
-    'Event starting soon: ' || e.title,
-    'Starts at ' || to_char(e.starts_at, 'YYYY-MM-DD HH24:MI'),
-    'event',
-    e.id,
-    'event_reminder_' || e.id::text || '_' || ea.user_id::text
-  from events e
-  join event_attendees ea on ea.event_id = e.id
-  where e.starts_at between now() and now() + interval '1 minute' * e.reminder_minutes_before
-    and e.deleted_at is null
-  on conflict (dedupe_key) do nothing;
-end $$;
+-- MANUAL SETUP REQUIRED (run once in Supabase SQL Editor with actual values):
+-- select vault.create_secret('https://your-service.onrender.com', 'planpal_api_url');
+-- select vault.create_secret('<same value as CRON_SECRET on Render>', 'planpal_cron_secret');
 
--- Weekly cleanup: delete old read notifications
-create or replace function cleanup_old_notifications() returns void
-language plpgsql security definer set search_path = public as $$
-begin
-  delete from notifications
-  where read_at is not null
-    and read_at < now() - interval '30 days';
-end $$;
 
--- Schedule cron jobs (idempotent)
-do $$
-begin
-  -- Unschedule if exists
-  perform cron.unschedule('planpal_deadline_reminders') where exists (
-    select 1 from cron.job where jobname = 'planpal_deadline_reminders'
-  );
-  perform cron.unschedule('planpal_overdue_notifications') where exists (
-    select 1 from cron.job where jobname = 'planpal_overdue_notifications'
-  );
-  perform cron.unschedule('planpal_event_reminders') where exists (
-    select 1 from cron.job where jobname = 'planpal_event_reminders'
-  );
-  perform cron.unschedule('planpal_weekly_cleanup') where exists (
-    select 1 from cron.job where jobname = 'planpal_weekly_cleanup'
-  );
-
-  -- Schedule jobs
-  perform cron.schedule('planpal_deadline_reminders', '*/15 * * * *', 'select create_deadline_notifications()');
-  perform cron.schedule('planpal_overdue_notifications', '0 9 * * *', 'select create_overdue_notifications()');
-  perform cron.schedule('planpal_event_reminders', '* * * * *', 'select create_event_reminders()');
-  perform cron.schedule('planpal_weekly_cleanup', '0 2 * * 0', 'select cleanup_old_notifications()');
-end $$;
-
--- ===== 0009_realtime =====
-
--- Add workspace tables to realtime publication (idempotent)
-do $$
-begin
-  if not exists (
-    select 1 from pg_publication_tables
-    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'tasks'
-  ) then
-    alter publication supabase_realtime add table tasks;
-  end if;
-
-  if not exists (
-    select 1 from pg_publication_tables
-    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'subtasks'
-  ) then
-    alter publication supabase_realtime add table subtasks;
-  end if;
-
-  if not exists (
-    select 1 from pg_publication_tables
-    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'task_comments'
-  ) then
-    alter publication supabase_realtime add table task_comments;
-  end if;
-
-  if not exists (
-    select 1 from pg_publication_tables
-    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'messages'
-  ) then
-    alter publication supabase_realtime add table messages;
-  end if;
-
-  if not exists (
-    select 1 from pg_publication_tables
-    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'notifications'
-  ) then
-    alter publication supabase_realtime add table notifications;
-  end if;
-
-  if not exists (
-    select 1 from pg_publication_tables
-    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'workspace_members'
-  ) then
-    alter publication supabase_realtime add table workspace_members;
-  end if;
-end $$;
-
--- ===== STORAGE_BUCKET_SETUP =====
-
--- Create storage bucket for planpal files
-insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-values (
-  'planpal-files',
-  'planpal-files',
-  false,
-  26214400, -- 25 MB
-  array[
-    'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp',
-    'application/pdf',
-    'application/msword',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'application/vnd.ms-excel',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'text/plain', 'text/csv'
-  ]
-)
-on conflict (id) do nothing;
-
--- Storage policies for planpal-files bucket
-drop policy if exists "Workspace members can upload files" on storage.objects;
-create policy "Workspace members can upload files"
-on storage.objects for insert
-with check (
-  bucket_id = 'planpal-files'
-  and auth.uid() is not null
-);
-
-drop policy if exists "Workspace members can read files" on storage.objects;
-create policy "Workspace members can read files"
-on storage.objects for select
-using (
-  bucket_id = 'planpal-files'
-  and auth.uid() is not null
-);
-
-drop policy if exists "Workspace members can delete files" on storage.objects;
-create policy "Workspace members can delete files"
-on storage.objects for delete
-using (
-  bucket_id = 'planpal-files'
-  and auth.uid() is not null
-);
-
+-- ---------------------------------------------------------------
+-- 0009_realtime.sql
+-- ---------------------------------------------------------------
 -- ============================================================================
--- SETUP COMPLETE
+-- Migration 0009: Supabase Realtime Configuration
 -- ============================================================================
--- Next steps:
--- 1. Verify tables exist in Supabase Dashboard > Table Editor
--- 2. Verify bucket 'planpal-files' exists in Storage
--- 3. Create a test user in Authentication and verify profile + Personal workspace
--- 4. Configure auth settings in Dashboard (see HOW_TO_RUN.md)
---
--- VAULT SECRETS (run these later in Stage 11 after deploying to Render):
--- select vault.create_secret('your-render-url', 'planpal_api_url');
--- select vault.create_secret('your-cron-secret-value', 'planpal_cron_secret');
+-- Enable Realtime for tables that the app listens to.
+-- RLS still applies to each change.
 -- ============================================================================
+
+alter publication supabase_realtime add table messages;
+alter publication supabase_realtime add table notifications;
+alter publication supabase_realtime add table tasks;
+alter publication supabase_realtime add table task_comments;
+alter publication supabase_realtime add table channel_members;
+alter publication supabase_realtime add table workspace_members;
+
+-- Presence (who is online) uses Realtime Presence on channel 'workspace:{id}'.
+-- Only write profiles.last_seen_at occasionally (app close), not every few seconds.
+
+
+-- =====================================================================
+-- AFTER THE RUN: store two secrets (needed for push notifications while the
+-- Render server sleeps). Do this once, with your REAL values, in a separate
+-- query. Never save real values in a file in Git.
+--   select vault.create_secret('https://YOUR-SERVICE.onrender.com', 'planpal_api_url');
+--   select vault.create_secret('THE-SAME-VALUE-AS-CRON_SECRET-ON-RENDER', 'planpal_cron_secret');
+-- Then run supabase/VERIFY.sql to check everything is in place.
+-- =====================================================================
