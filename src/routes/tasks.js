@@ -1,8 +1,8 @@
 import express from 'express';
 import { z } from 'zod';
-import { userClient, adminClient } from '../lib/supabase.js';
-import logger from '../lib/logger.js';
+import { userClient } from '../lib/supabase.js';
 import { AppError, ErrorCodes } from '../lib/errors.js';
+import { createNotifications } from '../lib/notifications.js';
 import { loadWorkspace } from '../middleware/workspace.js';
 import { validate } from '../middleware/validate.js';
 
@@ -271,20 +271,16 @@ router.post(
 
       // B4/2C fix: use adminClient with title/body
       if (assigneeId && assigneeId !== req.user.id) {
-        try {
-          await adminClient.from('notifications').upsert({
-            user_id: assigneeId,
-            type: 'task_assigned',
-            title: 'Task assigned to you',
-            body: `"${title}"`,
-            entity_type: 'task',
-            entity_id: task.id,
-            workspace_id: req.params.workspaceId,
-            dedupe_key: `task_assigned:${task.id}:${assigneeId}`,
-          }, { onConflict: 'dedupe_key', ignoreDuplicates: true });
-        } catch (notifErr) {
-          logger.warn('Failed to create task_assigned notification', notifErr);
-        }
+        await createNotifications([{
+          user_id: assigneeId,
+          type: 'task_assigned',
+          title: 'Task assigned to you',
+          body: `"${title}"`,
+          entity_type: 'task',
+          entity_id: task.id,
+          workspace_id: req.params.workspaceId,
+          dedupe_key: `task_assigned:${task.id}:${assigneeId}`,
+        }]);
       }
 
       res.status(201).json({ task });
@@ -369,40 +365,32 @@ router.patch(
       if (req.body.assigneeId !== undefined && req.body.assigneeId !== currentTask.assignee_id) {
         // Assignee changed — B4/2C fix
         if (req.body.assigneeId && req.body.assigneeId !== req.user.id) {
-          try {
-            await adminClient.from('notifications').upsert({
-              user_id: req.body.assigneeId,
-              type: 'task_assigned',
-              title: 'Task assigned to you',
-              body: `"${task.title}"`,
-              entity_type: 'task',
-              entity_id: task.id,
-              workspace_id: task.workspace_id,
-              dedupe_key: `task_assigned:${task.id}:${req.body.assigneeId}`,
-            }, { onConflict: 'dedupe_key', ignoreDuplicates: true });
-          } catch (notifErr) {
-            logger.warn('Failed to create task_assigned notification', notifErr);
-          }
+          await createNotifications([{
+            user_id: req.body.assigneeId,
+            type: 'task_assigned',
+            title: 'Task assigned to you',
+            body: `"${task.title}"`,
+            entity_type: 'task',
+            entity_id: task.id,
+            workspace_id: task.workspace_id,
+            dedupe_key: `task_assigned:${task.id}:${req.body.assigneeId}`,
+          }]);
         }
       }
 
       if (req.body.status !== undefined && req.body.status !== currentTask.status) {
         // Status changed — B4/2C fix
         if (currentTask.created_by !== req.user.id) {
-          try {
-            await adminClient.from('notifications').upsert({
-              user_id: currentTask.created_by,
-              type: 'task_updated',
-              title: 'Task updated',
-              body: `Status changed to ${req.body.status}`,
-              entity_type: 'task',
-              entity_id: task.id,
-              workspace_id: task.workspace_id,
-              dedupe_key: `task_updated:${task.id}:${currentTask.created_by}:${req.body.status}`,
-            }, { onConflict: 'dedupe_key', ignoreDuplicates: true });
-          } catch (notifErr) {
-            logger.warn('Failed to create task_updated notification', notifErr);
-          }
+          await createNotifications([{
+            user_id: currentTask.created_by,
+            type: 'task_updated',
+            title: 'Task updated',
+            body: `Status changed to ${req.body.status}`,
+            entity_type: 'task',
+            entity_id: task.id,
+            workspace_id: task.workspace_id,
+            dedupe_key: `task_updated:${task.id}:${currentTask.created_by}:${req.body.status}`,
+          }]);
         }
       }
 
@@ -685,12 +673,7 @@ router.post(
           workspace_id: task.workspace_id,
           dedupe_key: `task_comment:${comment.id}:${userId}`,
         }));
-        try {
-          await adminClient.from('notifications')
-            .upsert(notifs, { onConflict: 'dedupe_key', ignoreDuplicates: true });
-        } catch (notifErr) {
-          logger.warn('Failed to create task_comment notifications', notifErr);
-        }
+        await createNotifications(notifs);
       }
 
       // B4/2C fix: @mentions with adminClient and title/body
@@ -713,12 +696,7 @@ router.post(
         }
       }
       if (mentionNotifs.length > 0) {
-        try {
-          await adminClient.from('notifications')
-            .upsert(mentionNotifs, { onConflict: 'dedupe_key', ignoreDuplicates: true });
-        } catch (mentionErr) {
-          logger.warn('Failed to create mention notifications', mentionErr);
-        }
+        await createNotifications(mentionNotifs);
       }
 
       res.status(201).json({ comment });

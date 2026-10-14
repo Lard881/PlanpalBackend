@@ -49,28 +49,20 @@ export async function createNotification(notification) {
 }
 
 /**
- * Create multiple notifications (batch)
- * @param {Array<Object>} notifications - Array of notification data
- * @returns {Promise<Array<Object>>} Created notifications
+ * Create multiple notifications (batch).
+ * Never throws — logs warnings on failure so the caller's response is unaffected.
+ * @param {Array<Object>} rows - Notification rows (must include dedupe_key for idempotency)
+ * @returns {Promise<void>}
  */
-export async function createNotifications(notifications) {
-  if (!notifications || notifications.length === 0) {
-    return [];
-  }
+export async function createNotifications(rows) {
+  if (!rows || rows.length === 0) return;
 
-  try {
-    const { data, error } = await adminClient
-      .from('notifications')
-      .insert(notifications)
-      .select();
+  const { error } = await adminClient
+    .from('notifications')
+    .upsert(rows, { onConflict: 'dedupe_key', ignoreDuplicates: true });
 
-    if (error) throw error;
-
-    logger.info(`${data.length} notifications created`);
-    return data;
-  } catch (error) {
-    logger.error('Error creating batch notifications:', error);
-    throw error;
+  if (error) {
+    logger.warn('Failed to create notifications', { message: error.message, code: error.code });
   }
 }
 

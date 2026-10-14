@@ -50,8 +50,7 @@ function throwFirstError(results) {
  * GET /workspaces/:workspaceId/analytics?range=
  * Full analytics for workspace
  */
-router.get(
-  '/',
+router.get('/analytics',
   loadWorkspace,
   requireRole('admin', 'member'), // Guests blocked
   validate(analyticsQuerySchema, 'query'),
@@ -94,8 +93,7 @@ router.get(
  * GET /workspaces/:workspaceId/analytics/export.csv?range=
  * Export analytics as CSV
  */
-router.get(
-  '/export.csv',
+router.get('/analytics/export.csv',
   loadWorkspace,
   requireRole('admin', 'member'),
   validate(analyticsQuerySchema, 'query'),

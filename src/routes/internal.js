@@ -17,12 +17,7 @@ internalRouter.use(generalLimiter);
 internalRouter.post('/push/run', async (req, res) => {
   const requestId = req.id || 'unknown';
 
-  // Reject if Firebase is not configured — don't crash
-  if (!config.firebase.serviceAccount) {
-    return res.status(200).json({ ok: true, skipped: 'FIREBASE_NOT_CONFIGURED' });
-  }
-
-  // Validate cron secret
+  // R2.8 fix: validate cron secret FIRST — before leaking any config info
   const provided = req.headers['x-cron-secret'];
   const expected = config.cron.secret;
 
@@ -35,13 +30,17 @@ internalRouter.post('/push/run', async (req, res) => {
   // Constant-time compare to prevent timing attacks
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
-  const match =
-    a.length === b.length && crypto.timingSafeEqual(a, b);
+  const match = a.length === b.length && crypto.timingSafeEqual(a, b);
 
   if (!match) {
     return res.status(401).json({
       error: { code: 'UNAUTHORIZED', message: 'Invalid cron secret', requestId },
     });
+  }
+
+  // Reject if Firebase is not configured — don't crash
+  if (!config.firebase.serviceAccount) {
+    return res.status(200).json({ ok: true, skipped: 'FIREBASE_NOT_CONFIGURED' });
   }
 
   try {

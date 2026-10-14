@@ -4,9 +4,11 @@ import { userClient, adminClient } from '../lib/supabase.js';
 import { loadWorkspace } from '../middleware/workspace.js';
 import { validate } from '../middleware/validate.js';
 import { AppError, ErrorCodes } from '../lib/errors.js';
-import logger from '../lib/logger.js';
+import { createNotifications } from '../lib/notifications.js';
 
 const router = express.Router({ mergeParams: true });
+// Item-level routes: the URL has no workspace id (RLS enforces access)
+const itemRouter = express.Router();
 
 const createChannelSchema = z.object({
   name: z.string().min(1).max(100),
@@ -40,7 +42,7 @@ const messagesQuerySchema = z.object({
  * GET /workspaces/:workspaceId/channels
  * List channels and DMs with unread counts and last message
  */
-router.get('/', loadWorkspace, async (req, res, next) => {
+router.get('/channels', loadWorkspace, async (req, res, next) => {
   try {
     if (req.workspace.type === 'personal') {
       throw new AppError(
@@ -74,6 +76,24 @@ router.get('/', loadWorkspace, async (req, res, next) => {
       .eq('workspace_id', req.params.workspaceId);
 
     if (channelsError) throw channelsError;
+
+    // R2.4: For DM channels, pre-fetch the other member's profile
+    const dmChannelIds = (channels || [])
+      .filter(c => c.kind === 'dm')
+      .map(c => c.id);
+
+    const otherUsersByChannel = {};
+    if (dmChannelIds.length > 0) {
+      const { data: dmMembers } = await supabase
+        .from('channel_members')
+        .select('channel_id, user_id, profiles!channel_members_user_id_fkey(id, full_name, avatar_url)')
+        .in('channel_id', dmChannelIds)
+        .neq('user_id', req.user.id);
+
+      (dmMembers || []).forEach(m => {
+        otherUsersByChannel[m.channel_id] = m.profiles;
+      });
+    }
 
     // For each channel, get last message and unread count
     const formatted = await Promise.all((channels || []).map(async (channel) => {
@@ -113,6 +133,8 @@ router.get('/', loadWorkspace, async (req, res, next) => {
           authorName: lastMsg.sender?.full_name,
         } : null,
         unreadCount: unreadCount || 0,
+        // R2.4: include other user for DM channels so the app can display a name/avatar
+        ...(channel.kind === 'dm' ? { otherUser: otherUsersByChannel[channel.id] || null } : {}),
       };
     }));
 
@@ -126,7 +148,7 @@ router.get('/', loadWorkspace, async (req, res, next) => {
  * POST /workspaces/:workspaceId/channels
  * Create a channel
  */
-router.post('/', loadWorkspace, validate(createChannelSchema), async (req, res, next) => {
+router.post('/channels', loadWorkspace, validate(createChannelSchema), async (req, res, next) => {
   try {
     if (req.workspace.type === 'personal') {
       throw new AppError(
@@ -199,7 +221,15 @@ router.post('/dms', loadWorkspace, validate(createDmSchema), async (req, res, ne
 
     if (loadError) throw loadError;
 
-    res.json({ channel });
+    // R2.4: include the other user's profile in the DM response
+    const { data: otherMember } = await supabase
+      .from('channel_members')
+      .select('profiles!channel_members_user_id_fkey(id, full_name, avatar_url)')
+      .eq('channel_id', channelId)
+      .neq('user_id', req.user.id)
+      .maybeSingle();
+
+    res.json({ channel: { ...channel, otherUser: otherMember?.profiles || null } });
   } catch (error) {
     next(error);
   }
@@ -209,7 +239,7 @@ router.post('/dms', loadWorkspace, validate(createDmSchema), async (req, res, ne
  * POST /channels/:channelId/members
  * Add member to channel
  */
-router.post('/:channelId/members', validate(addMemberSchema), async (req, res, next) => {
+itemRouter.post('/channels/:channelId/members', validate(addMemberSchema), async (req, res, next) => {
   try {
     const { userId } = req.body;
     const supabase = userClient(req.jwt);
@@ -232,7 +262,7 @@ router.post('/:channelId/members', validate(addMemberSchema), async (req, res, n
  * DELETE /channels/:channelId/members/:userId
  * Remove member or leave channel
  */
-router.delete('/:channelId/members/:userId', async (req, res, next) => {
+itemRouter.delete('/channels/:channelId/members/:userId', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
@@ -255,7 +285,7 @@ router.delete('/:channelId/members/:userId', async (req, res, next) => {
  * Get message history with cursor pagination
  * B1 fix: use 'messages' table and 'sender_id' column
  */
-router.get('/:channelId/messages', validate(messagesQuerySchema, 'query'), async (req, res, next) => {
+itemRouter.get('/channels/:channelId/messages', validate(messagesQuerySchema, 'query'), async (req, res, next) => {
   try {
     const { before, limit = 50 } = req.query;
     const supabase = userClient(req.jwt);
@@ -292,7 +322,7 @@ router.get('/:channelId/messages', validate(messagesQuerySchema, 'query'), async
  * Send a message (idempotent by client id)
  * B1 fix: use 'messages' table and 'sender_id' column
  */
-router.post('/:channelId/messages', validate(sendMessageSchema), async (req, res, next) => {
+itemRouter.post('/channels/:channelId/messages', validate(sendMessageSchema), async (req, res, next) => {
   try {
     const { id, body, fileId } = req.body;
     const supabase = userClient(req.jwt);
@@ -355,14 +385,7 @@ router.post('/:channelId/messages', validate(sendMessageSchema), async (req, res
       }));
 
     if (notifications.length > 0) {
-      try {
-        await adminClient
-          .from('notifications')
-          .upsert(notifications, { onConflict: 'dedupe_key', ignoreDuplicates: true });
-      } catch (notifError) {
-        logger.warn('Failed to create chat notifications', notifError);
-        // Non-fatal: message was sent successfully
-      }
+      await createNotifications(notifications);
     }
 
     // Parse @mentions and create mention notifications
@@ -388,13 +411,7 @@ router.post('/:channelId/messages', validate(sendMessageSchema), async (req, res
       }
 
       if (mentionNotifs.length > 0) {
-        try {
-          await adminClient
-            .from('notifications')
-            .upsert(mentionNotifs, { onConflict: 'dedupe_key', ignoreDuplicates: true });
-        } catch (mentionError) {
-          logger.warn('Failed to create mention notifications', mentionError);
-        }
+        await createNotifications(mentionNotifs);
       }
     }
 
@@ -408,7 +425,7 @@ router.post('/:channelId/messages', validate(sendMessageSchema), async (req, res
  * PATCH /messages/:messageId
  * Edit own message
  */
-router.patch('/messages/:messageId', validate(z.object({ body: z.string().max(4000) })), async (req, res, next) => {
+itemRouter.patch('/messages/:messageId', validate(z.object({ body: z.string().max(4000) })), async (req, res, next) => {
   try {
     const { body } = req.body;
     const supabase = userClient(req.jwt);
@@ -434,7 +451,7 @@ router.patch('/messages/:messageId', validate(z.object({ body: z.string().max(40
  * DELETE /messages/:messageId
  * Soft delete (own message or admin)
  */
-router.delete('/messages/:messageId', async (req, res, next) => {
+itemRouter.delete('/messages/:messageId', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
@@ -464,7 +481,7 @@ router.delete('/messages/:messageId', async (req, res, next) => {
  * POST /channels/:channelId/read
  * Mark channel as read
  */
-router.post('/:channelId/read', async (req, res, next) => {
+itemRouter.post('/channels/:channelId/read', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
@@ -482,4 +499,5 @@ router.post('/:channelId/read', async (req, res, next) => {
   }
 });
 
+export { itemRouter as channelItemRouter };
 export default router;

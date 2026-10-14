@@ -5,6 +5,8 @@ import { loadWorkspace } from '../middleware/workspace.js';
 import { validate } from '../middleware/validate.js';
 
 const router = express.Router({ mergeParams: true });
+// Item-level routes: the URL has no workspace id (RLS enforces access)
+const itemRouter = express.Router();
 
 const eventsQuerySchema = z.object({
   from: z.string().datetime(),
@@ -120,7 +122,7 @@ router.post(
  * PATCH /events/:eventId
  * Update an event
  */
-router.patch('/:eventId', validate(updateEventSchema), async (req, res, next) => {
+itemRouter.patch('/events/:eventId', validate(updateEventSchema), async (req, res, next) => {
   try {
     const { attendeeIds, ...updates } = req.body;
     const supabase = userClient(req.jwt);
@@ -155,7 +157,7 @@ router.patch('/:eventId', validate(updateEventSchema), async (req, res, next) =>
  * DELETE /events/:eventId
  * Soft delete an event
  */
-router.delete('/:eventId', async (req, res, next) => {
+itemRouter.delete('/events/:eventId', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
@@ -172,4 +174,5 @@ router.delete('/:eventId', async (req, res, next) => {
   }
 });
 
+export { itemRouter as eventItemRouter };
 export default router;

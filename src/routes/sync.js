@@ -29,7 +29,7 @@ router.get(
       const supabase = userClient(req.jwt);
       const workspaceId = req.params.workspaceId;
       const since = req.query.since || new Date(0).toISOString();
-      const maxRows = 1000;
+      const maxRows = parseInt(process.env.SYNC_MAX_ROWS || '1000', 10);
 
       // 2F fix: capture serverTime BEFORE queries
       const serverTime = new Date().toISOString();
@@ -186,7 +186,11 @@ router.get(
       const totalRows = allArrays.reduce((sum, arr) => sum + arr.length, 0);
       const hasMore = totalRows > maxRows;
 
-      // 2F fix: actually apply the cutoff (was dead code before)
+      // R2.3 fix: apply the cutoff (was dead code before) and return correct serverTime
+      // When hasMore, serverTime = cutoff (largest updated_at among returned rows) so
+      // the app uses it as next `since` and misses no rows between cutoff and now.
+      let responseServerTime = serverTime;
+
       if (hasMore) {
         const allTimestamps = allArrays.flatMap(arr =>
           arr.map(item => new Date(item.updated_at).getTime())
@@ -195,8 +199,12 @@ router.get(
         const cutoffTs = allTimestamps[Math.min(maxRows - 1, allTimestamps.length - 1)];
         const cutoffTime = new Date(cutoffTs).toISOString();
 
+        // R2.3 fix: return cutoff as serverTime when paging
+        responseServerTime = cutoffTime;
+
+        // R2.3 fix: compare as numbers (timestamps), not strings
         const filterByCutoff = (arr) =>
-          arr.filter(item => item.updated_at <= cutoffTime);
+          arr.filter(item => new Date(item.updated_at).getTime() <= cutoffTs);
 
         tasks = filterByCutoff(tasks);
         subtasks = filterByCutoff(subtasks);
@@ -213,7 +221,7 @@ router.get(
       }
 
       res.json({
-        serverTime,
+        serverTime: responseServerTime,
         tasks,
         subtasks,
         taskComments,

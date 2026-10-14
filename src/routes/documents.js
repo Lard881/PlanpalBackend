@@ -6,6 +6,8 @@ import { validate } from '../middleware/validate.js';
 import { AppError, ErrorCodes } from '../lib/errors.js';
 
 const router = express.Router({ mergeParams: true });
+// Item-level routes: the URL has no workspace id (RLS enforces access)
+const itemRouter = express.Router();
 
 const listDocsQuerySchema = z.object({
   folderId: z.string().uuid().optional(),
@@ -116,7 +118,7 @@ router.post('/folders', loadWorkspace, validate(createFolderSchema), async (req,
  * PATCH /folders/:folderId
  * Update folder
  */
-router.patch('/folders/:folderId', validate(updateFolderSchema), async (req, res, next) => {
+itemRouter.patch('/folders/:folderId', validate(updateFolderSchema), async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
@@ -139,7 +141,7 @@ router.patch('/folders/:folderId', validate(updateFolderSchema), async (req, res
  * DELETE /folders/:folderId
  * Delete folder (only if empty)
  */
-router.delete('/folders/:folderId', async (req, res, next) => {
+itemRouter.delete('/folders/:folderId', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
@@ -251,7 +253,7 @@ router.post('/documents', loadWorkspace, validate(createDocumentSchema), async (
  * GET /documents/:documentId
  * Get full document
  */
-router.get('/documents/:documentId', async (req, res, next) => {
+itemRouter.get('/documents/:documentId', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
@@ -273,7 +275,7 @@ router.get('/documents/:documentId', async (req, res, next) => {
  * PATCH /documents/:documentId
  * Update document
  */
-router.patch('/documents/:documentId', validate(updateDocumentSchema), async (req, res, next) => {
+itemRouter.patch('/documents/:documentId', validate(updateDocumentSchema), async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
@@ -296,7 +298,7 @@ router.patch('/documents/:documentId', validate(updateDocumentSchema), async (re
  * DELETE /documents/:documentId
  * Soft delete document
  */
-router.delete('/documents/:documentId', async (req, res, next) => {
+itemRouter.delete('/documents/:documentId', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
@@ -313,4 +315,5 @@ router.delete('/documents/:documentId', async (req, res, next) => {
   }
 });
 
+export { itemRouter as documentItemRouter };
 export default router;

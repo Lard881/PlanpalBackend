@@ -15,10 +15,10 @@ import workspacesRouter from './routes/workspaces.js';
 import labelsRouter from './routes/labels.js';
 import syncRouter from './routes/sync.js';
 import tasksRouter from './routes/tasks.js';
-import eventsRouter from './routes/events.js';
+import eventsRouter, { eventItemRouter } from './routes/events.js';
 import filesRouter from './routes/files.js';
-import documentsRouter from './routes/documents.js';
-import channelsRouter from './routes/channels.js';
+import documentsRouter, { documentItemRouter } from './routes/documents.js';
+import channelsRouter, { channelItemRouter } from './routes/channels.js';
 import notificationsRouter from './routes/notifications.js';
 import devicesRouter from './routes/devices.js';
 import searchRouter from './routes/search.js';
@@ -71,6 +71,12 @@ export function createApp() {
   apiRouter.use('/notifications', notificationsRouter);
   apiRouter.use('/devices', devicesRouter);
   apiRouter.use('/search', searchRouter);
+
+  // Item-level routes (no workspace id in the URL; RLS enforces access):
+  // /channels/:id/..., /messages/:id, /folders/:id, /documents/:id, /events/:id
+  apiRouter.use('/', channelItemRouter);
+  apiRouter.use('/', documentItemRouter);
+  apiRouter.use('/', eventItemRouter);
   
   // Nested routes under workspaces
   const workspaceNestedRouter = express.Router({ mergeParams: true });
