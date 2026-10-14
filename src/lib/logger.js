@@ -41,3 +41,5 @@ export const httpLogger = pinoHttp({
     }),
   },
 });
+
+export default logger;
