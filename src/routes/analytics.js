@@ -14,6 +14,38 @@ const overviewQuerySchema = z.object({
   range: z.enum(['week', '7d', '30d']).optional(),
 });
 
+const RANGE_DAYS = { week: 7, '7d': 7, '30d': 30, '90d': 90 };
+
+/** Convert a range name to the from/to values the SQL functions expect. */
+function rangeBounds(range) {
+  const days = RANGE_DAYS[range] ?? 7;
+  const to = new Date();
+  const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
+  return {
+    from: from.toISOString(),
+    to: to.toISOString(),
+    fromDate: from.toISOString().slice(0, 10),
+    toDate: to.toISOString().slice(0, 10),
+  };
+}
+
+/** Table-returning functions come back as an array; the summary is the first row. */
+function firstRow(data) {
+  return Array.isArray(data) ? data[0] ?? {} : data ?? {};
+}
+
+function percentChange(current, previous) {
+  const c = Number(current ?? 0);
+  const p = Number(previous ?? 0);
+  if (!p) return null;
+  return Math.round(((c - p) / p) * 100);
+}
+
+function throwFirstError(results) {
+  const failed = results.find(r => r.error);
+  if (failed) throw failed.error;
+}
+
 /**
  * GET /workspaces/:workspaceId/analytics?range=
  * Full analytics for workspace
@@ -27,37 +59,26 @@ router.get(
     try {
       const { range = '7d' } = req.query;
       const supabase = userClient(req.jwt);
+      const ws = req.params.workspaceId;
+      const { from, to, fromDate, toDate } = rangeBounds(range);
 
-      // Call all analytics functions in parallel
-      const [
-        { data: summary },
-        { data: weekly },
-        { data: categories },
-        { data: daily },
-        { data: streak },
-      ] = await Promise.all([
-        supabase.rpc('analytics_summary', {
-          p_workspace_id: req.params.workspaceId,
-          p_range: range,
-        }),
-        supabase.rpc('analytics_weekly', {
-          p_workspace_id: req.params.workspaceId,
-        }),
-        supabase.rpc('analytics_by_category', {
-          p_workspace_id: req.params.workspaceId,
-          p_range: range,
-        }),
-        supabase.rpc('analytics_daily_completion', {
-          p_workspace_id: req.params.workspaceId,
-          p_range: range,
-        }),
-        supabase.rpc('get_completion_streak', {
-          p_workspace_id: req.params.workspaceId,
-        }),
+      const results = await Promise.all([
+        supabase.rpc('analytics_summary', { p_workspace: ws, p_from: from, p_to: to }),
+        supabase.rpc('analytics_weekly', { p_workspace: ws, p_from: from, p_to: to }),
+        supabase.rpc('analytics_categories', { p_workspace: ws, p_from: from, p_to: to }),
+        supabase.rpc('analytics_daily', { p_workspace: ws, p_from: fromDate, p_to: toDate }),
+        supabase.rpc('analytics_streak', { p_workspace: ws }),
       ]);
+      throwFirstError(results);
+
+      const [summary, weekly, categories, daily, streak] = results.map(r => r.data);
+      const s0 = firstRow(summary);
 
       res.json({
-        summary: summary || {},
+        summary: {
+          ...s0,
+          changeVsPrevious: percentChange(s0.completed, s0.completed_prev),
+        },
         weekly: weekly || [],
         categories: categories || [],
         daily: daily || [],
@@ -76,26 +97,24 @@ router.get(
 router.get(
   '/export.csv',
   loadWorkspace,
-  requireRole('admin', 'full'),
+  requireRole('admin', 'member'),
   validate(analyticsQuerySchema, 'query'),
   async (req, res, next) => {
     try {
       const { range = '7d' } = req.query;
       const supabase = userClient(req.jwt);
+      const { fromDate, toDate } = rangeBounds(range);
 
-      // Get daily completion data
-      const { data: daily, error } = await supabase.rpc('analytics_daily_completion', {
-        p_workspace_id: req.params.workspaceId,
-        p_range: range,
+      const { data: daily, error } = await supabase.rpc('analytics_daily', {
+        p_workspace: req.params.workspaceId,
+        p_from: fromDate,
+        p_to: toDate,
       });
 
       if (error) throw error;
 
-      // Generate CSV
-      const headers = 'Date,Completed Tasks,Created Tasks,Completion Rate\n';
-      const rows = (daily || []).map(row => 
-        `${row.date},${row.completed},${row.created},${row.completion_rate || 0}`
-      ).join('\n');
+      const headers = 'Date,Completed Tasks\n';
+      const rows = (daily || []).map(row => `${row.day},${row.completed}`).join('\n');
 
       const csv = headers + rows;
 
@@ -121,11 +140,16 @@ router.get(
       const { range = 'week' } = req.query;
       const supabase = userClient(req.jwt);
 
-      // Get summary
-      const { data: summary } = await supabase.rpc('analytics_summary', {
-        p_workspace_id: req.params.workspaceId,
-        p_range: range === 'week' ? '7d' : range,
+      const { from, to, fromDate, toDate } = rangeBounds(range);
+      const ws = req.params.workspaceId;
+
+      const summaryRes = await supabase.rpc('analytics_summary', {
+        p_workspace: ws,
+        p_from: from,
+        p_to: to,
       });
+      if (summaryRes.error) throw summaryRes.error;
+      const summary = firstRow(summaryRes.data);
 
       // Get task counts
       const [
@@ -155,18 +179,22 @@ router.get(
       ]);
 
       // Get daily series
-      const { data: daily } = await supabase.rpc('analytics_daily_completion', {
-        p_workspace_id: req.params.workspaceId,
-        p_range: range === 'week' ? '7d' : range,
+      const dailyRes = await supabase.rpc('analytics_daily', {
+        p_workspace: ws,
+        p_from: fromDate,
+        p_to: toDate,
       });
+      if (dailyRes.error) throw dailyRes.error;
+      const daily = dailyRes.data;
 
       res.json({
         counts: {
-          completed: completedCount || 0,
+          // completed is limited to the chosen range, like the 'Tasks Completed' tile on Home
+          completed: Number(summary.completed ?? completedCount ?? 0),
           inProgress: inProgressCount || 0,
           overdue: overdueCount || 0,
         },
-        productivityPercent: summary?.on_time_rate || 0,
+        productivityPercent: Number(summary.on_time_rate ?? 0),
         dailySeries: daily || [],
       });
     } catch (error) {

@@ -4,6 +4,7 @@ import { userClient, adminClient } from '../lib/supabase.js';
 import { loadWorkspace } from '../middleware/workspace.js';
 import { validate } from '../middleware/validate.js';
 import { AppError, ErrorCodes } from '../lib/errors.js';
+import { fileUploadLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
 
@@ -42,6 +43,7 @@ function sanitizeFileName(name) {
  */
 router.post(
   '/workspaces/:workspaceId/files/upload-url',
+  fileUploadLimiter,
   loadWorkspace,
   validate(uploadUrlSchema),
   async (req, res, next) => {
@@ -69,9 +71,9 @@ router.post(
       const supabase = userClient(req.jwt);
       const fileId = crypto.randomUUID();
       const sanitizedName = sanitizeFileName(name);
-      const path = `${req.params.workspaceId}/${fileId}/${sanitizedName}`;
+      const storagePath = `${req.params.workspaceId}/${fileId}/${sanitizedName}`;
 
-      // Insert file record (RLS checks role)
+      // B3 fix: use storage_path not path
       const { data: file, error: insertError } = await supabase
         .from('files')
         .insert({
@@ -80,7 +82,7 @@ router.post(
           name: sanitizedName,
           mime_type: mimeType,
           size_bytes: sizeBytes,
-          path,
+          storage_path: storagePath,
           uploaded_by: req.user.id,
         })
         .select()
@@ -88,10 +90,9 @@ router.post(
 
       if (insertError) throw insertError;
 
-      // Create signed upload URL with admin client
       const { data: signedData, error: signError } = await adminClient.storage
         .from('planpal-files')
-        .createSignedUploadUrl(path);
+        .createSignedUploadUrl(storagePath);
 
       if (signError) throw signError;
 
@@ -99,7 +100,7 @@ router.post(
         fileId: file.id,
         uploadUrl: signedData.signedUrl,
         token: signedData.token,
-        path: file.path,
+        path: file.storage_path, // Keep response key 'path' for client compat
       });
     } catch (error) {
       next(error);
@@ -115,10 +116,10 @@ router.get('/files/:fileId/download-url', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
-    // Load file with user client (RLS enforced)
+    // B3 fix: select storage_path
     const { data: file, error: fileError } = await supabase
       .from('files')
-      .select('path')
+      .select('storage_path')
       .eq('id', req.params.fileId)
       .single();
 
@@ -126,10 +127,9 @@ router.get('/files/:fileId/download-url', async (req, res, next) => {
       throw new AppError(ErrorCodes.NOT_FOUND, 'File not found', 404);
     }
 
-    // Create signed download URL with admin client (5 minutes)
     const { data: signedData, error: signError } = await adminClient.storage
       .from('planpal-files')
-      .createSignedUrl(file.path, 300); // 5 minutes
+      .createSignedUrl(file.storage_path, 300);
 
     if (signError) throw signError;
 
@@ -147,16 +147,15 @@ router.delete('/files/:fileId', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
-    // Get file info
+    // B3 fix: select storage_path
     const { data: file, error: fileError } = await supabase
       .from('files')
-      .select('path, uploaded_by')
+      .select('storage_path, uploaded_by')
       .eq('id', req.params.fileId)
       .single();
 
     if (fileError) throw fileError;
 
-    // Soft delete file record
     const { error: deleteError } = await supabase
       .from('files')
       .update({ deleted_at: new Date().toISOString() })
@@ -164,10 +163,9 @@ router.delete('/files/:fileId', async (req, res, next) => {
 
     if (deleteError) throw deleteError;
 
-    // Delete from storage with admin client
     await adminClient.storage
       .from('planpal-files')
-      .remove([file.path]);
+      .remove([file.storage_path]);
 
     res.status(204).send();
   } catch (error) {

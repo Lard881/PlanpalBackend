@@ -24,7 +24,7 @@ router.get('/', validate(searchQuerySchema, 'query'), async (req, res, next) => 
     // Call search_all function
     const { data, error } = await supabase.rpc('search_all', {
       p_query: q,
-      p_workspace_id: workspaceId || null,
+      p_workspace: workspaceId || null,
       p_limit: limit,
     });
 
@@ -35,15 +35,16 @@ router.get('/', validate(searchQuerySchema, 'query'), async (req, res, next) => 
     const documents = [];
     const people = [];
 
+    // search_all returns rows: { kind, id, workspace_id, title, subtitle, score, at }
     (data || []).forEach(result => {
-      if (result.entity_type === 'task') tasks.push(result);
-      else if (result.entity_type === 'document') documents.push(result);
-      else if (result.entity_type === 'person') people.push(result);
+      if (result.kind === 'task') tasks.push(result);
+      else if (result.kind === 'document') documents.push(result);
+      else if (result.kind === 'person') people.push(result);
     });
 
     // Deduplicate people by id
     const peopleMap = new Map();
-    people.forEach(p => peopleMap.set(p.entity_id, p));
+    people.forEach(p => peopleMap.set(p.id, p));
     const uniquePeople = Array.from(peopleMap.values());
 
     // Filter by type if specified

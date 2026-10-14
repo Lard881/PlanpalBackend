@@ -1,6 +1,7 @@
 import express from 'express';
 import { z } from 'zod';
-import { userClient } from '../lib/supabase.js';
+import { userClient, adminClient } from '../lib/supabase.js';
+import logger from '../lib/logger.js';
 import { AppError, ErrorCodes } from '../lib/errors.js';
 import { loadWorkspace } from '../middleware/workspace.js';
 import { validate } from '../middleware/validate.js';
@@ -9,8 +10,8 @@ const router = express.Router();
 
 // Validation schemas
 const taskQuerySchema = z.object({
-  status: z.enum(['backlog', 'todo', 'in_progress', 'completed']).optional(),
-  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
+  status: z.enum(['todo', 'in_progress', 'completed']).optional(),
+  priority: z.enum(['low', 'medium', 'high']).optional(),
   assigneeId: z.string().uuid().optional(),
   labelId: z.string().uuid().optional(),
   dueFrom: z.string().datetime().optional(),
@@ -27,7 +28,7 @@ const createTaskSchema = z.object({
   id: z.string().uuid().optional(),
   title: z.string().min(1).max(500),
   description: z.string().max(5000).optional(),
-  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
+  priority: z.enum(['low', 'medium', 'high']).optional(),
   dueAt: z.string().datetime().optional(),
   assigneeId: z.string().uuid().optional(),
   labelId: z.string().uuid().optional(),
@@ -40,8 +41,8 @@ const createTaskSchema = z.object({
 const updateTaskSchema = z.object({
   title: z.string().min(1).max(500).optional(),
   description: z.string().max(5000).optional().nullable(),
-  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
-  status: z.enum(['backlog', 'todo', 'in_progress', 'completed']).optional(),
+  priority: z.enum(['low', 'medium', 'high']).optional(),
+  status: z.enum(['todo', 'in_progress', 'completed']).optional(),
   dueAt: z.string().datetime().optional().nullable(),
   assigneeId: z.string().uuid().optional().nullable(),
   labelId: z.string().uuid().optional().nullable(),
@@ -268,17 +269,22 @@ router.post(
         await supabase.from('task_attachments').insert(attachmentInserts);
       }
 
-      // Create notification if assigned to someone else
+      // B4/2C fix: use adminClient with title/body
       if (assigneeId && assigneeId !== req.user.id) {
-        await supabase.from('notifications').insert({
-          user_id: assigneeId,
-          type: 'task_assigned',
-          entity_type: 'task',
-          entity_id: task.id,
-          workspace_id: req.params.workspaceId,
-          text: `${req.user.email} assigned you a task: ${title}`,
-          dedupe_key: `task_assigned:${task.id}:${assigneeId}`,
-        });
+        try {
+          await adminClient.from('notifications').upsert({
+            user_id: assigneeId,
+            type: 'task_assigned',
+            title: 'Task assigned to you',
+            body: `"${title}"`,
+            entity_type: 'task',
+            entity_id: task.id,
+            workspace_id: req.params.workspaceId,
+            dedupe_key: `task_assigned:${task.id}:${assigneeId}`,
+          }, { onConflict: 'dedupe_key', ignoreDuplicates: true });
+        } catch (notifErr) {
+          logger.warn('Failed to create task_assigned notification', notifErr);
+        }
       }
 
       res.status(201).json({ task });
@@ -361,32 +367,42 @@ router.patch(
 
       // Detect changes and create notifications
       if (req.body.assigneeId !== undefined && req.body.assigneeId !== currentTask.assignee_id) {
-        // Assignee changed
+        // Assignee changed — B4/2C fix
         if (req.body.assigneeId && req.body.assigneeId !== req.user.id) {
-          await supabase.from('notifications').insert({
-            user_id: req.body.assigneeId,
-            type: 'task_assigned',
-            entity_type: 'task',
-            entity_id: task.id,
-            workspace_id: task.workspace_id,
-            text: `${req.user.email} assigned you a task: ${task.title}`,
-            dedupe_key: `task_assigned:${task.id}:${req.body.assigneeId}`,
-          });
+          try {
+            await adminClient.from('notifications').upsert({
+              user_id: req.body.assigneeId,
+              type: 'task_assigned',
+              title: 'Task assigned to you',
+              body: `"${task.title}"`,
+              entity_type: 'task',
+              entity_id: task.id,
+              workspace_id: task.workspace_id,
+              dedupe_key: `task_assigned:${task.id}:${req.body.assigneeId}`,
+            }, { onConflict: 'dedupe_key', ignoreDuplicates: true });
+          } catch (notifErr) {
+            logger.warn('Failed to create task_assigned notification', notifErr);
+          }
         }
       }
 
       if (req.body.status !== undefined && req.body.status !== currentTask.status) {
-        // Status changed, notify creator
+        // Status changed — B4/2C fix
         if (currentTask.created_by !== req.user.id) {
-          await supabase.from('notifications').insert({
-            user_id: currentTask.created_by,
-            type: 'task_updated',
-            entity_type: 'task',
-            entity_id: task.id,
-            workspace_id: task.workspace_id,
-            text: `Task status changed to ${req.body.status}: ${task.title}`,
-            dedupe_key: `task_updated:${task.id}:${currentTask.created_by}:${Date.now()}`,
-          });
+          try {
+            await adminClient.from('notifications').upsert({
+              user_id: currentTask.created_by,
+              type: 'task_updated',
+              title: 'Task updated',
+              body: `Status changed to ${req.body.status}`,
+              entity_type: 'task',
+              entity_id: task.id,
+              workspace_id: task.workspace_id,
+              dedupe_key: `task_updated:${task.id}:${currentTask.created_by}:${req.body.status}`,
+            }, { onConflict: 'dedupe_key', ignoreDuplicates: true });
+          } catch (notifErr) {
+            logger.warn('Failed to create task_updated notification', notifErr);
+          }
         }
       }
 
@@ -472,12 +488,21 @@ router.post(
       const { targetWorkspaceId } = req.body;
       const supabase = userClient(req.jwt);
 
-      const { data: task, error } = await supabase.rpc('move_task_to_workspace', {
-        p_task_id: req.params.taskId,
-        p_target_workspace_id: targetWorkspaceId,
+      // move_task_to_workspace returns void, so load the updated task afterwards
+      const { error } = await supabase.rpc('move_task_to_workspace', {
+        p_task: req.params.taskId,
+        p_target: targetWorkspaceId,
       });
 
       if (error) throw error;
+
+      const { data: task, error: loadError } = await supabase
+        .from('tasks')
+        .select('*')
+        .eq('id', req.params.taskId)
+        .single();
+
+      if (loadError) throw loadError;
 
       res.json({ task });
     } catch (error) {
@@ -645,37 +670,54 @@ router.post(
 
       if (error) throw error;
 
-      // Notify assignee and creator
+      // B4/2C fix: use adminClient with title/body, batch upsert
       const toNotify = new Set([task.assignee_id, task.created_by].filter(Boolean));
-      toNotify.delete(req.user.id); // Don't notify self
+      toNotify.delete(req.user.id);
 
-      for (const userId of toNotify) {
-        await supabase.from('notifications').insert({
+      if (toNotify.size > 0) {
+        const notifs = [...toNotify].map(userId => ({
           user_id: userId,
           type: 'task_comment',
+          title: 'New comment on a task',
+          body: body.substring(0, 200),
           entity_type: 'task',
           entity_id: req.params.taskId,
           workspace_id: task.workspace_id,
-          text: `${req.user.email} commented on a task`,
           dedupe_key: `task_comment:${comment.id}:${userId}`,
-        });
+        }));
+        try {
+          await adminClient.from('notifications')
+            .upsert(notifs, { onConflict: 'dedupe_key', ignoreDuplicates: true });
+        } catch (notifErr) {
+          logger.warn('Failed to create task_comment notifications', notifErr);
+        }
       }
 
-      // Parse @mentions and create mention notifications
+      // B4/2C fix: @mentions with adminClient and title/body
       const mentionRegex = /@\[([^\]]+)\]\(user:([a-f0-9-]+)\)/g;
       let match;
+      const mentionNotifs = [];
       while ((match = mentionRegex.exec(body)) !== null) {
         const mentionedUserId = match[2];
         if (mentionedUserId !== req.user.id) {
-          await supabase.from('notifications').insert({
+          mentionNotifs.push({
             user_id: mentionedUserId,
             type: 'mention',
+            title: 'You were mentioned',
+            body: `Mentioned you in a task comment`,
             entity_type: 'task',
             entity_id: req.params.taskId,
             workspace_id: task.workspace_id,
-            text: `${req.user.email} mentioned you in a comment`,
             dedupe_key: `mention:${comment.id}:${mentionedUserId}`,
           });
+        }
+      }
+      if (mentionNotifs.length > 0) {
+        try {
+          await adminClient.from('notifications')
+            .upsert(mentionNotifs, { onConflict: 'dedupe_key', ignoreDuplicates: true });
+        } catch (mentionErr) {
+          logger.warn('Failed to create mention notifications', mentionErr);
         }
       }
 

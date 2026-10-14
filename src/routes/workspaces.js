@@ -5,6 +5,7 @@ import { AppError, ErrorCodes } from '../lib/errors.js';
 import { loadWorkspace, requireRole } from '../middleware/workspace.js';
 import { validate } from '../middleware/validate.js';
 import { generateInviteCode, normalizeInviteCode } from '../lib/codes.js';
+import { joinWorkspaceLimiter } from '../middleware/rateLimit.js';
 
 const router = express.Router();
 
@@ -236,7 +237,7 @@ router.delete(
  * POST /workspaces/join
  * Join workspace with invite code
  */
-router.post('/join', validate(joinWorkspaceSchema), async (req, res, next) => {
+router.post('/join', joinWorkspaceLimiter, validate(joinWorkspaceSchema), async (req, res, next) => {
   try {
     const code = normalizeInviteCode(req.body.code);
     const supabase = userClient(req.jwt);

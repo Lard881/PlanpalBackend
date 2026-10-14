@@ -1,0 +1,302 @@
+diff -u -r a/src/routes/analytics.js b/src/routes/analytics.js
+--- a/src/routes/analytics.js	2026-10-12 22:57:00.655988072 +0000
++++ b/src/routes/analytics.js	2026-10-12 22:57:09.572178184 +0000
+@@ -14,6 +14,38 @@
+   range: z.enum(['week', '7d', '30d']).optional(),
+ });
+ 
++const RANGE_DAYS = { week: 7, '7d': 7, '30d': 30, '90d': 90 };
++
++/** Convert a range name to the from/to values the SQL functions expect. */
++function rangeBounds(range) {
++  const days = RANGE_DAYS[range] ?? 7;
++  const to = new Date();
++  const from = new Date(to.getTime() - days * 24 * 60 * 60 * 1000);
++  return {
++    from: from.toISOString(),
++    to: to.toISOString(),
++    fromDate: from.toISOString().slice(0, 10),
++    toDate: to.toISOString().slice(0, 10),
++  };
++}
++
++/** Table-returning functions come back as an array; the summary is the first row. */
++function firstRow(data) {
++  return Array.isArray(data) ? data[0] ?? {} : data ?? {};
++}
++
++function percentChange(current, previous) {
++  const c = Number(current ?? 0);
++  const p = Number(previous ?? 0);
++  if (!p) return null;
++  return Math.round(((c - p) / p) * 100);
++}
++
++function throwFirstError(results) {
++  const failed = results.find(r => r.error);
++  if (failed) throw failed.error;
++}
++
+ /**
+  * GET /workspaces/:workspaceId/analytics?range=
+  * Full analytics for workspace
+@@ -27,37 +59,26 @@
+     try {
+       const { range = '7d' } = req.query;
+       const supabase = userClient(req.jwt);
++      const ws = req.params.workspaceId;
++      const { from, to, fromDate, toDate } = rangeBounds(range);
+ 
+-      // Call all analytics functions in parallel
+-      const [
+-        { data: summary },
+-        { data: weekly },
+-        { data: categories },
+-        { data: daily },
+-        { data: streak },
+-      ] = await Promise.all([
+-        supabase.rpc('analytics_summary', {
+-          p_workspace_id: req.params.workspaceId,
+-          p_range: range,
+-        }),
+-        supabase.rpc('analytics_weekly', {
+-          p_workspace_id: req.params.workspaceId,
+-        }),
+-        supabase.rpc('analytics_by_category', {
+-          p_workspace_id: req.params.workspaceId,
+-          p_range: range,
+-        }),
+-        supabase.rpc('analytics_daily_completion', {
+-          p_workspace_id: req.params.workspaceId,
+-          p_range: range,
+-        }),
+-        supabase.rpc('get_completion_streak', {
+-          p_workspace_id: req.params.workspaceId,
+-        }),
++      const results = await Promise.all([
++        supabase.rpc('analytics_summary', { p_workspace: ws, p_from: from, p_to: to }),
++        supabase.rpc('analytics_weekly', { p_workspace: ws, p_from: from, p_to: to }),
++        supabase.rpc('analytics_categories', { p_workspace: ws, p_from: from, p_to: to }),
++        supabase.rpc('analytics_daily', { p_workspace: ws, p_from: fromDate, p_to: toDate }),
++        supabase.rpc('analytics_streak', { p_workspace: ws }),
+       ]);
++      throwFirstError(results);
++
++      const [summary, weekly, categories, daily, streak] = results.map(r => r.data);
++      const s0 = firstRow(summary);
+ 
+       res.json({
+-        summary: summary || {},
++        summary: {
++          ...s0,
++          changeVsPrevious: percentChange(s0.completed, s0.completed_prev),
++        },
+         weekly: weekly || [],
+         categories: categories || [],
+         daily: daily || [],
+@@ -76,26 +97,24 @@
+ router.get(
+   '/export.csv',
+   loadWorkspace,
+-  requireRole('admin', 'full'),
++  requireRole('admin', 'member'),
+   validate(analyticsQuerySchema, 'query'),
+   async (req, res, next) => {
+     try {
+       const { range = '7d' } = req.query;
+       const supabase = userClient(req.jwt);
++      const { fromDate, toDate } = rangeBounds(range);
+ 
+-      // Get daily completion data
+-      const { data: daily, error } = await supabase.rpc('analytics_daily_completion', {
+-        p_workspace_id: req.params.workspaceId,
+-        p_range: range,
++      const { data: daily, error } = await supabase.rpc('analytics_daily', {
++        p_workspace: req.params.workspaceId,
++        p_from: fromDate,
++        p_to: toDate,
+       });
+ 
+       if (error) throw error;
+ 
+-      // Generate CSV
+-      const headers = 'Date,Completed Tasks,Created Tasks,Completion Rate\n';
+-      const rows = (daily || []).map(row => 
+-        `${row.date},${row.completed},${row.created},${row.completion_rate || 0}`
+-      ).join('\n');
++      const headers = 'Date,Completed Tasks\n';
++      const rows = (daily || []).map(row => `${row.day},${row.completed}`).join('\n');
+ 
+       const csv = headers + rows;
+ 
+@@ -121,11 +140,16 @@
+       const { range = 'week' } = req.query;
+       const supabase = userClient(req.jwt);
+ 
+-      // Get summary
+-      const { data: summary } = await supabase.rpc('analytics_summary', {
+-        p_workspace_id: req.params.workspaceId,
+-        p_range: range === 'week' ? '7d' : range,
++      const { from, to, fromDate, toDate } = rangeBounds(range);
++      const ws = req.params.workspaceId;
++
++      const summaryRes = await supabase.rpc('analytics_summary', {
++        p_workspace: ws,
++        p_from: from,
++        p_to: to,
+       });
++      if (summaryRes.error) throw summaryRes.error;
++      const summary = firstRow(summaryRes.data);
+ 
+       // Get task counts
+       const [
+@@ -155,18 +179,22 @@
+       ]);
+ 
+       // Get daily series
+-      const { data: daily } = await supabase.rpc('analytics_daily_completion', {
+-        p_workspace_id: req.params.workspaceId,
+-        p_range: range === 'week' ? '7d' : range,
++      const dailyRes = await supabase.rpc('analytics_daily', {
++        p_workspace: ws,
++        p_from: fromDate,
++        p_to: toDate,
+       });
++      if (dailyRes.error) throw dailyRes.error;
++      const daily = dailyRes.data;
+ 
+       res.json({
+         counts: {
+-          completed: completedCount || 0,
++          // completed is limited to the chosen range, like the 'Tasks Completed' tile on Home
++          completed: Number(summary.completed ?? completedCount ?? 0),
+           inProgress: inProgressCount || 0,
+           overdue: overdueCount || 0,
+         },
+-        productivityPercent: summary?.on_time_rate || 0,
++        productivityPercent: Number(summary.on_time_rate ?? 0),
+         dailySeries: daily || [],
+       });
+     } catch (error) {
+diff -u -r a/src/routes/channels.js b/src/routes/channels.js
+--- a/src/routes/channels.js	2026-10-12 22:57:00.658542458 +0000
++++ b/src/routes/channels.js	2026-10-12 22:57:00.680986087 +0000
+@@ -155,13 +155,22 @@
+     const { userId } = req.body;
+     const supabase = userClient(req.jwt);
+ 
+-    const { data: channel, error } = await supabase.rpc('get_or_create_dm', {
+-      p_workspace_id: req.params.workspaceId,
+-      p_other_user_id: userId,
++    // get_or_create_dm returns the channel id (uuid)
++    const { data: channelId, error } = await supabase.rpc('get_or_create_dm', {
++      p_workspace: req.params.workspaceId,
++      p_other: userId,
+     });
+ 
+     if (error) throw error;
+ 
++    const { data: channel, error: loadError } = await supabase
++      .from('channels')
++      .select('*')
++      .eq('id', channelId)
++      .single();
++
++    if (loadError) throw loadError;
++
+     res.json({ channel });
+   } catch (error) {
+     next(error);
+diff -u -r a/src/routes/search.js b/src/routes/search.js
+--- a/src/routes/search.js	2026-10-12 22:57:00.653359156 +0000
++++ b/src/routes/search.js	2026-10-12 22:57:00.680812936 +0000
+@@ -24,7 +24,7 @@
+     // Call search_all function
+     const { data, error } = await supabase.rpc('search_all', {
+       p_query: q,
+-      p_workspace_id: workspaceId || null,
++      p_workspace: workspaceId || null,
+       p_limit: limit,
+     });
+ 
+@@ -35,15 +35,16 @@
+     const documents = [];
+     const people = [];
+ 
++    // search_all returns rows: { kind, id, workspace_id, title, subtitle, score, at }
+     (data || []).forEach(result => {
+-      if (result.entity_type === 'task') tasks.push(result);
+-      else if (result.entity_type === 'document') documents.push(result);
+-      else if (result.entity_type === 'person') people.push(result);
++      if (result.kind === 'task') tasks.push(result);
++      else if (result.kind === 'document') documents.push(result);
++      else if (result.kind === 'person') people.push(result);
+     });
+ 
+     // Deduplicate people by id
+     const peopleMap = new Map();
+-    people.forEach(p => peopleMap.set(p.entity_id, p));
++    people.forEach(p => peopleMap.set(p.id, p));
+     const uniquePeople = Array.from(peopleMap.values());
+ 
+     // Filter by type if specified
+diff -u -r a/src/routes/tasks.js b/src/routes/tasks.js
+--- a/src/routes/tasks.js	2026-10-12 22:57:00.661181092 +0000
++++ b/src/routes/tasks.js	2026-10-13 07:01:20.544659012 +0000
+@@ -9,8 +9,8 @@
+ 
+ // Validation schemas
+ const taskQuerySchema = z.object({
+-  status: z.enum(['backlog', 'todo', 'in_progress', 'completed']).optional(),
+-  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
++  status: z.enum(['todo', 'in_progress', 'completed']).optional(),
++  priority: z.enum(['low', 'medium', 'high']).optional(),
+   assigneeId: z.string().uuid().optional(),
+   labelId: z.string().uuid().optional(),
+   dueFrom: z.string().datetime().optional(),
+@@ -27,7 +27,7 @@
+   id: z.string().uuid().optional(),
+   title: z.string().min(1).max(500),
+   description: z.string().max(5000).optional(),
+-  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
++  priority: z.enum(['low', 'medium', 'high']).optional(),
+   dueAt: z.string().datetime().optional(),
+   assigneeId: z.string().uuid().optional(),
+   labelId: z.string().uuid().optional(),
+@@ -40,8 +40,8 @@
+ const updateTaskSchema = z.object({
+   title: z.string().min(1).max(500).optional(),
+   description: z.string().max(5000).optional().nullable(),
+-  priority: z.enum(['low', 'medium', 'high', 'urgent']).optional(),
+-  status: z.enum(['backlog', 'todo', 'in_progress', 'completed']).optional(),
++  priority: z.enum(['low', 'medium', 'high']).optional(),
++  status: z.enum(['todo', 'in_progress', 'completed']).optional(),
+   dueAt: z.string().datetime().optional().nullable(),
+   assigneeId: z.string().uuid().optional().nullable(),
+   labelId: z.string().uuid().optional().nullable(),
+@@ -472,13 +472,22 @@
+       const { targetWorkspaceId } = req.body;
+       const supabase = userClient(req.jwt);
+ 
+-      const { data: task, error } = await supabase.rpc('move_task_to_workspace', {
+-        p_task_id: req.params.taskId,
+-        p_target_workspace_id: targetWorkspaceId,
++      // move_task_to_workspace returns void, so load the updated task afterwards
++      const { error } = await supabase.rpc('move_task_to_workspace', {
++        p_task: req.params.taskId,
++        p_target: targetWorkspaceId,
+       });
+ 
+       if (error) throw error;
+ 
++      const { data: task, error: loadError } = await supabase
++        .from('tasks')
++        .select('*')
++        .eq('id', req.params.taskId)
++        .single();
++
++      if (loadError) throw loadError;
++
+       res.json({ task });
+     } catch (error) {
+       next(error);

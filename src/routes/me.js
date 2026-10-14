@@ -256,14 +256,14 @@ router.delete('/', validate(deleteAccountSchema), async (req, res, next) => {
     
     // Delete personal workspace and its files
     if (personalWorkspace) {
-      // Delete all files in workspace storage
+      // B3 fix: use storage_path
       const { data: files } = await supabase
         .from('files')
-        .select('path')
+        .select('storage_path')
         .eq('workspace_id', personalWorkspace.workspace_id);
       
       if (files && files.length > 0) {
-        const paths = files.map(f => f.path);
+        const paths = files.map(f => f.storage_path).filter(Boolean);
         await supabaseAdmin.storage
           .from('planpal-files')
           .remove(paths);
