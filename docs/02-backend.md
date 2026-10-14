@@ -104,7 +104,7 @@ For routes containing `:workspaceId`, load the caller's `workspace_members` row 
 - JSON in, JSON out. Dates are ISO 8601 UTC strings.
 - IDs are UUIDs. The client may send its own `id` when creating a row (offline creation). The server must accept it and treat a repeat of the same `id` from the same user as **idempotent** (return the existing row, not an error).
 - Soft delete: `DELETE` endpoints set `deleted_at`. Reads exclude deleted rows unless the sync endpoint asks for them.
-- Pagination: cursor style. `?limit=30&cursor=<opaque>`. Response: `{ "data": [...], "nextCursor": "..." | null }`.
+- Pagination: cursor style. `?limit=30&cursor=<opaque>`. Response: `{ tasks: [...], nextCursor: "..." | null }` (named wrapper key matches the entity, e.g. `{ tasks }`, `{ task }`, `{ channels }`, `{ channel }`, etc).
 - Validation: every body and query is validated with zod. On failure respond `400 VALIDATION_FAILED` with field errors.
 - Rate limits: 300 requests per 15 minutes per user in general; stricter for `POST /workspaces/join` (10 per hour) and file upload URLs (60 per hour).
 - Security middleware: `helmet`, `cors` (only `ALLOWED_ORIGINS`; native apps send no Origin), body size limit 1 MB, trust proxy on (Render is behind a proxy).
@@ -233,9 +233,9 @@ After a successful join, insert a `member_joined` notification for the workspace
 ### 6.7 Chat
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/workspaces/:workspaceId/channels` | Channels the user can see plus their DMs, each with `unreadCount` and last message preview. Team workspaces only; on Personal respond `400 CHAT_NOT_AVAILABLE_IN_PERSONAL`. |
+| GET | `/workspaces/:workspaceId/channels` | Channels the user can see plus their DMs, each with `unreadCount`, last message preview, and `otherUser` (for DMs). Team workspaces only; on Personal respond `400 CHAT_NOT_AVAILABLE_IN_PERSONAL`. |
 | POST | `/workspaces/:workspaceId/channels` | Body `{ name, description?, isPrivate?, memberIds?[] }`. |
-| POST | `/workspaces/:workspaceId/dms` | Body `{ userId }`. Calls `get_or_create_dm`. |
+| POST | `/workspaces/:workspaceId/dms` | Body `{ userId }`. Calls `get_or_create_dm`. Response includes `otherUser`. |
 | POST | `/channels/:channelId/members` | Add people (channel creator or admin). |
 | DELETE | `/channels/:channelId/members/:userId` | Remove or leave. |
 | GET | `/channels/:channelId/messages?before=&limit=50` | History (older pages). New messages arrive through Supabase Realtime. |
@@ -290,7 +290,7 @@ Image previews in chat: the app asks for a download URL per image and caches it.
 ### 6.12 Analytics
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/workspaces/:workspaceId/analytics?range=7d|30d|90d` | Runs the analytics functions (summary, weekly, categories, daily, streak) in parallel and returns one object. Includes `changeVsPrevious` percent for tasks completed. Member or admin; guests get `403`. |
+| GET | `/workspaces/:workspaceId/analytics?range=7d|30d|90d` | Runs the analytics functions (summary, weekly, categories, daily, streak) in parallel and returns one object. Includes `changeVsPrevious` percent for tasks completed (field name `summary.changeVsPrevious`). Member or admin; guests get `403`. |
 | GET | `/workspaces/:workspaceId/analytics/export.csv?range=` | CSV download for "Export CSV". |
 | GET | `/workspaces/:workspaceId/overview?range=week` | Small version for the Home dashboard: counts (completed, in progress, overdue), productivity %, daily series. |
 
