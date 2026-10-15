@@ -1,8 +1,11 @@
 import request from 'supertest';
 import app from '../src/index.js';
 import { adminClient } from '../src/lib/supabase.js';
+import { skipDbTests, logSkip } from './helpers/db.js';
 
-describe('Tasks API', () => {
+logSkip('Tasks API');
+
+(skipDbTests ? describe.skip : describe)('Tasks API', () => {
   let authToken;
   let userId;
   let workspaceId;

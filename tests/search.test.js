@@ -12,14 +12,14 @@ import { createClient } from '@supabase/supabase-js';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
 
-const supabaseUrl = process.env.TEST_SUPABASE_URL || process.env.SUPABASE_URL;
-const supabaseServiceKey = process.env.TEST_SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+import {
+  TEST_SUPABASE_URL as supabaseUrl,
+  TEST_SUPABASE_SERVICE_KEY as supabaseServiceKey,
+  skipDbTests as skipTests,
+  logSkip,
+} from './helpers/db.js';
 
-const skipTests = !supabaseUrl || !supabaseServiceKey;
-
-if (skipTests) {
-  console.log('\n⚠️  Skipping Search tests: Test database credentials not set\n');
-}
+logSkip('Search tests');
 
 (skipTests ? describe.skip : describe)('Stage 12: Search Tests (S12.2)', () => {
   let app;

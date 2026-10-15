@@ -8,16 +8,15 @@
 import { createClient } from '@supabase/supabase-js';
 import { describe, test, expect, beforeAll, afterAll } from '@jest/globals';
 
-const SUPABASE_URL = process.env.TEST_SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.TEST_SUPABASE_ANON_KEY;
-const SUPABASE_SERVICE_KEY = process.env.TEST_SUPABASE_SERVICE_KEY;
+import {
+  TEST_SUPABASE_URL as SUPABASE_URL,
+  TEST_SUPABASE_ANON_KEY as SUPABASE_ANON_KEY,
+  TEST_SUPABASE_SERVICE_KEY as SUPABASE_SERVICE_KEY,
+  skipDbTests as skipTests,
+  logSkip,
+} from './helpers/db.js';
 
-// Skip all tests if Supabase credentials are not provided
-const skipTests = !SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_KEY;
-
-if (skipTests) {
-  console.log('\n⚠️  Skipping RLS tests: TEST_SUPABASE_URL, TEST_SUPABASE_ANON_KEY, or TEST_SUPABASE_SERVICE_KEY not set\n');
-}
+logSkip('RLS tests');
 
 (skipTests ? describe.skip : describe)('RLS Isolation Tests', () => {
   let adminClient;

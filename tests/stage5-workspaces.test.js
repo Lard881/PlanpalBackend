@@ -2,17 +2,15 @@ import request from 'supertest';
 import { createClient } from '@supabase/supabase-js';
 import { describe, test, expect, beforeAll, afterAll } from '@jest/globals';
 import { createApp } from '../src/app.js';
+import {
+  TEST_SUPABASE_URL as SUPABASE_URL,
+  TEST_SUPABASE_ANON_KEY as SUPABASE_ANON_KEY,
+  TEST_SUPABASE_SERVICE_KEY as SUPABASE_SERVICE_KEY,
+  skipDbTests as skipTests,
+  logSkip,
+} from './helpers/db.js';
 
-// Use TEST database
-const SUPABASE_URL = process.env.TEST_SUPABASE_URL || process.env.SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.TEST_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
-const SUPABASE_SERVICE_KEY = process.env.TEST_SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-const skipTests = !SUPABASE_URL || !SUPABASE_ANON_KEY || !SUPABASE_SERVICE_KEY;
-
-if (skipTests) {
-  console.log('\n⚠️  Skipping Stage 5 tests: Supabase credentials not set\n');
-}
+logSkip('Stage 5 tests');
 
 (skipTests ? describe.skip : describe)('Stage 5: Workspaces, Members, and Invite Codes', () => {
   let app;

@@ -1,8 +1,11 @@
 import request from 'supertest';
 import app from '../src/index.js';
 import { adminClient } from '../src/lib/supabase.js';
+import { skipDbTests, logSkip } from './helpers/db.js';
 
-describe('Events API - S8.4', () => {
+logSkip('Events API');
+
+(skipDbTests ? describe.skip : describe)('Events API - S8.4', () => {
   let authToken;
   let userId;
   let workspaceId;
