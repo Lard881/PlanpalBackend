@@ -284,11 +284,11 @@ Admin only.
   "reminderMinutesBefore": 60,
   "assigneeId": "uuid",
   "labelId": "uuid",
-  "subtasks": [{ "title": "Book venue" }],
+  "subtasks": [{ "id": "uuid", "title": "Book venue" }],
   "attachmentFileIds": ["uuid"]
 }
 ```
-`id` is optional (client-generated for offline use; idempotent on repeat).
+`id` is optional (client-generated for offline use; idempotent on repeat). Subtask IDs are optional and client-supplied IDs make retried offline task creation idempotent without duplicate subtasks.
 `reminderMinutesBefore` is optional and nullable. Values must be whole minutes >= 5; `null` or omission uses the default reminder 24 hours before the due time.
 
 **Response 201** `{ "task": { ...same shape as list row... } }`
@@ -340,15 +340,17 @@ Admin only.
 
 ## POST /tasks/:taskId/subtasks
 
-**Request body** `{ "title": "Book venue" }`
+**Request body** `{ "id": "uuid", "title": "Book venue" }`; `id` is optional and client-supplied IDs are idempotent for offline retries. Replaying the same ID and matching task/title returns the existing subtask.
 
-**Response 201** `{ "subtask": { "id", "task_id", "title", "done", "position", "created_at" } }`
+**Response 201** `{ "subtask": { "id", "task_id", "title", "is_done", "position", "created_at" } }`
 
 ---
 
 ## PATCH /subtasks/:subtaskId
 
 **Request body** `{ "title": "...", "done": true }` (at least one required)
+
+`done` is mapped to the database field `is_done`.
 
 **Response 200** `{ "subtask": { ... } }`
 
@@ -370,7 +372,7 @@ Admin only.
 
 ## POST /tasks/:taskId/comments
 
-**Request body** `{ "body": "Looks good! @[Maya Chen](user:uuid)" }`
+**Request body** `{ "id": "uuid", "body": "Looks good! @[Maya Chen](user:uuid)" }`; `id` is optional and client-supplied IDs are idempotent for offline retries.
 
 **Response 201** `{ "comment": { "id", "task_id", "body", "created_at", "author": { ... } } }`
 
@@ -460,6 +462,8 @@ Author or admin.
   "reminderMinutesBefore": 15
 }
 ```
+
+`id` is optional. A client-supplied ID supports offline retries; replaying the same event data does not create a duplicate event or attendee.
 
 **Response 201** `{ "event": { ... } }`
 

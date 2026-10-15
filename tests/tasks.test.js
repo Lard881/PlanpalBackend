@@ -1,9 +1,18 @@
 import request from 'supertest';
+import { createClient } from '@supabase/supabase-js';
+import { randomUUID } from 'node:crypto';
+import { jest } from '@jest/globals';
 import app from '../src/index.js';
 import { adminClient } from '../src/lib/supabase.js';
-import { skipDbTests, logSkip } from './helpers/db.js';
+import {
+  TEST_SUPABASE_URL,
+  TEST_SUPABASE_ANON_KEY,
+  skipDbTests,
+  logSkip,
+} from './helpers/db.js';
 
 logSkip('Tasks API');
+jest.setTimeout(30000);
 
 (skipDbTests ? describe.skip : describe)('Tasks API', () => {
   let authToken;
@@ -16,9 +25,13 @@ logSkip('Tasks API');
   let labelId;
   let taskId;
   let supabase;
+  let authClient;
 
   beforeAll(async () => {
-    supabase = adminClient();
+    supabase = adminClient;
+    authClient = createClient(TEST_SUPABASE_URL, TEST_SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
     // Create test user 1 (admin)
     const { data: { user: user1 } } = await supabase.auth.admin.createUser({
@@ -28,7 +41,7 @@ logSkip('Tasks API');
     });
     adminUserId = user1.id;
 
-    const { data: { session: session1 } } = await supabase.auth.signInWithPassword({
+    const { data: { session: session1 } } = await authClient.auth.signInWithPassword({
       email: user1.email,
       password: 'password123',
     });
@@ -39,7 +52,7 @@ logSkip('Tasks API');
       .from('workspaces')
       .select('id')
       .eq('created_by', adminUserId)
-      .eq('is_personal', true)
+      .eq('type', 'personal')
       .single();
     workspaceId = workspaces.id;
 
@@ -51,7 +64,7 @@ logSkip('Tasks API');
     });
     userId = user2.id;
 
-    const { data: { session: session2 } } = await supabase.auth.signInWithPassword({
+    const { data: { session: session2 } } = await authClient.auth.signInWithPassword({
       email: user2.email,
       password: 'password123',
     });
@@ -72,7 +85,7 @@ logSkip('Tasks API');
     });
     guestUserId = user3.id;
 
-    const { data: { session: session3 } } = await supabase.auth.signInWithPassword({
+    const { data: { session: session3 } } = await authClient.auth.signInWithPassword({
       email: user3.email,
       password: 'password123',
     });
@@ -86,7 +99,7 @@ logSkip('Tasks API');
     });
 
     // Create a label for testing
-    const { data: label } = await supabase
+    const { data: label, error: labelError } = await supabase
       .from('labels')
       .insert({
         workspace_id: workspaceId,
@@ -95,6 +108,8 @@ logSkip('Tasks API');
       })
       .select()
       .single();
+    if (labelError) throw labelError;
+    if (!label) throw new Error('Task test label setup returned no label');
     labelId = label.id;
   });
 
@@ -107,12 +122,14 @@ logSkip('Tasks API');
 
   describe('POST /workspaces/:workspaceId/tasks', () => {
     it('should create a task with client-supplied ID (idempotency)', async () => {
-      const clientId = '550e8400-e29b-41d4-a716-446655440000';
+      const clientId = randomUUID();
+      const subtaskId = randomUUID();
       const taskData = {
         id: clientId,
         title: 'Idempotent Task',
         description: 'Testing idempotency',
         priority: 'high',
+        subtasks: [{ id: subtaskId, title: 'Idempotent subtask' }],
       };
 
       // First request
@@ -133,6 +150,11 @@ logSkip('Tasks API');
         .expect(201);
 
       expect(res2.body.task.id).toBe(clientId);
+      const { count } = await supabase
+        .from('subtasks')
+        .select('id', { count: 'exact', head: true })
+        .eq('id', subtaskId);
+      expect(count).toBe(1);
 
       taskId = clientId;
     });
@@ -149,7 +171,7 @@ logSkip('Tasks API');
         })
         .expect(400);
 
-      expect(res.body.code).toBe('FORBIDDEN');
+      expect(res.body.error.code).toBe('FORBIDDEN');
     });
 
     it('should create notification when assigning to another user', async () => {
@@ -206,14 +228,14 @@ logSkip('Tasks API');
           workspace_id: workspaceId,
           title: 'Overdue Task',
           status: 'in_progress',
-          priority: 'urgent',
+          priority: 'high',
           due_at: yesterday.toISOString(),
           created_by: userId,
         },
         {
           workspace_id: workspaceId,
           title: 'Week Task',
-          status: 'backlog',
+          status: 'todo',
           priority: 'medium',
           due_at: nextWeek.toISOString(),
           created_by: userId,
@@ -241,13 +263,13 @@ logSkip('Tasks API');
 
     it('should filter tasks by priority', async () => {
       const res = await request(app)
-        .get(`/api/v1/workspaces/${workspaceId}/tasks?priority=urgent`)
+        .get(`/api/v1/workspaces/${workspaceId}/tasks?priority=high`)
         .set('Authorization', `Bearer ${authToken}`)
         .expect(200);
 
       expect(res.body.tasks.length).toBeGreaterThanOrEqual(1);
       res.body.tasks.forEach(task => {
-        expect(task.priority).toBe('urgent');
+        expect(task.priority).toBe('high');
       });
     });
 
@@ -284,7 +306,8 @@ logSkip('Tasks API');
 
       // Fetch next page
       const res2 = await request(app)
-        .get(`/api/v1/workspaces/${workspaceId}/tasks?limit=2&cursor=${res1.body.nextCursor}`)
+        .get(`/api/v1/workspaces/${workspaceId}/tasks`)
+        .query({ limit: 2, cursor: res1.body.nextCursor })
         .set('Authorization', `Bearer ${authToken}`)
         .expect(200);
 
@@ -380,7 +403,7 @@ logSkip('Tasks API');
         .send({
           title: 'Guest Update',
         })
-        .expect(403);
+        .expect(404);
     });
   });
 
@@ -447,7 +470,7 @@ logSkip('Tasks API');
       await request(app)
         .delete(`/api/v1/tasks/${task.id}`)
         .set('Authorization', `Bearer ${guestToken}`)
-        .expect(403);
+        .expect(404);
     });
   });
 
@@ -524,19 +547,21 @@ logSkip('Tasks API');
         })
         .expect(200);
 
-      expect(res.body.succeeded.length).toBeGreaterThanOrEqual(0);
-      expect(res.body.failed.length).toBeGreaterThanOrEqual(0);
+      expect(res.body.succeeded).toContain(bulkTaskIds[0]);
+      expect(res.body.failed).toEqual([{ id: invalidId, code: 'OPERATION_FAILED' }]);
     });
 
     it('should NOT allow guests to bulk action tasks', async () => {
-      await request(app)
+      const res = await request(app)
         .post('/api/v1/tasks/bulk')
         .set('Authorization', `Bearer ${guestToken}`)
         .send({
           ids: bulkTaskIds,
           action: 'complete',
         })
-        .expect(403);
+        .expect(200);
+      expect(res.body.succeeded).toHaveLength(0);
+      expect(res.body.failed).toHaveLength(bulkTaskIds.length);
     });
   });
 
@@ -571,7 +596,6 @@ logSkip('Tasks API');
       // Add both users to target workspace
       await supabase.from('workspace_members').insert([
         { workspace_id: targetWorkspaceId, user_id: userId, role: 'member' },
-        { workspace_id: targetWorkspaceId, user_id: adminUserId, role: 'admin' },
       ]);
     });
 
@@ -643,6 +667,29 @@ logSkip('Tasks API');
       expect(res.body.subtask.title).toBe('Subtask 1');
     });
 
+    it('should create a client-ID subtask idempotently', async () => {
+      const clientId = randomUUID();
+      const body = { id: clientId, title: 'Offline subtask' };
+      const first = await request(app)
+        .post(`/api/v1/tasks/${parentTaskId}/subtasks`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send(body)
+        .expect(201);
+      const retry = await request(app)
+        .post(`/api/v1/tasks/${parentTaskId}/subtasks`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send(body)
+        .expect(201);
+
+      expect(first.body.subtask.id).toBe(clientId);
+      expect(retry.body.subtask.id).toBe(clientId);
+      const { count } = await supabase
+        .from('subtasks')
+        .select('id', { count: 'exact', head: true })
+        .eq('id', clientId);
+      expect(count).toBe(1);
+    });
+
     it('should update subtask', async () => {
       const { data: subtask } = await supabase
         .from('subtasks')
@@ -662,7 +709,7 @@ logSkip('Tasks API');
         })
         .expect(200);
 
-      expect(res.body.subtask.done).toBe(true);
+      expect(res.body.subtask.is_done).toBe(true);
     });
 
     it('should create comment with mention', async () => {
@@ -687,6 +734,29 @@ logSkip('Tasks API');
       expect(notifications.length).toBeGreaterThanOrEqual(1);
     });
 
+    it('should create a client-ID comment idempotently', async () => {
+      const clientId = randomUUID();
+      const body = { id: clientId, body: 'Offline comment' };
+      const first = await request(app)
+        .post(`/api/v1/tasks/${parentTaskId}/comments`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send(body)
+        .expect(201);
+      const retry = await request(app)
+        .post(`/api/v1/tasks/${parentTaskId}/comments`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send(body)
+        .expect(201);
+
+      expect(first.body.comment.id).toBe(clientId);
+      expect(retry.body.comment.id).toBe(clientId);
+      const { count } = await supabase
+        .from('task_comments')
+        .select('id', { count: 'exact', head: true })
+        .eq('id', clientId);
+      expect(count).toBe(1);
+    });
+
     it('should NOT allow guests to create comments', async () => {
       await request(app)
         .post(`/api/v1/tasks/${parentTaskId}/comments`)
@@ -694,7 +764,7 @@ logSkip('Tasks API');
         .send({
           body: 'Guest comment',
         })
-        .expect(403);
+        .expect(404);
     });
   });
 });

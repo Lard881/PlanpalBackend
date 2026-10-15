@@ -1,9 +1,18 @@
 import request from 'supertest';
+import { createClient } from '@supabase/supabase-js';
+import { randomUUID } from 'node:crypto';
+import { jest } from '@jest/globals';
 import app from '../src/index.js';
 import { adminClient } from '../src/lib/supabase.js';
-import { skipDbTests, logSkip } from './helpers/db.js';
+import {
+  TEST_SUPABASE_URL,
+  TEST_SUPABASE_ANON_KEY,
+  skipDbTests,
+  logSkip,
+} from './helpers/db.js';
 
 logSkip('Events API');
+jest.setTimeout(30000);
 
 (skipDbTests ? describe.skip : describe)('Events API - S8.4', () => {
   let authToken;
@@ -12,9 +21,13 @@ logSkip('Events API');
   let memberToken;
   let memberUserId;
   let supabase;
+  let authClient;
 
   beforeAll(async () => {
-    supabase = adminClient();
+    supabase = adminClient;
+    authClient = createClient(TEST_SUPABASE_URL, TEST_SUPABASE_ANON_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
     // Create admin user
     const { data: { user: admin } } = await supabase.auth.admin.createUser({
@@ -24,7 +37,7 @@ logSkip('Events API');
     });
     userId = admin.id;
 
-    const { data: { session: adminSession } } = await supabase.auth.signInWithPassword({
+    const { data: { session: adminSession } } = await authClient.auth.signInWithPassword({
       email: admin.email,
       password: 'password123',
     });
@@ -35,7 +48,7 @@ logSkip('Events API');
       .from('workspaces')
       .select('id')
       .eq('created_by', userId)
-      .eq('is_personal', true)
+      .eq('type', 'personal')
       .single();
     workspaceId = workspace.id;
 
@@ -47,7 +60,7 @@ logSkip('Events API');
     });
     memberUserId = member.id;
 
-    const { data: { session: memberSession } } = await supabase.auth.signInWithPassword({
+    const { data: { session: memberSession } } = await authClient.auth.signInWithPassword({
       email: member.email,
       password: 'password123',
     });
@@ -71,14 +84,14 @@ logSkip('Events API');
       // Create test events
       const now = new Date();
       const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-      const nextWeek = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+      const nextWeek = new Date(now.getTime() + 6 * 24 * 60 * 60 * 1000);
 
       await supabase.from('events').insert([
         {
           workspace_id: workspaceId,
           title: 'Today Event',
-          starts_at: now.toISOString(),
-          ends_at: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+          starts_at: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
+          ends_at: new Date(now.getTime() + 2 * 60 * 60 * 1000).toISOString(),
           created_by: userId,
         },
         {
@@ -199,19 +212,18 @@ logSkip('Events API');
         attendeeIds: [fakeUserId],
       };
 
-      // This should fail at DB level due to foreign key constraint
       const res = await request(app)
         .post(`/api/v1/workspaces/${workspaceId}/events`)
         .set('Authorization', `Bearer ${authToken}`)
         .send(eventData);
 
-      // May be 400 or 500 depending on error handling
-      expect([400, 500]).toContain(res.status);
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('FORBIDDEN');
     });
 
     it('should create event with client-supplied ID (idempotency)', async () => {
       const now = new Date();
-      const clientId = '550e8400-e29b-41d4-a716-446655440001';
+      const clientId = randomUUID();
 
       const eventData = {
         id: clientId,

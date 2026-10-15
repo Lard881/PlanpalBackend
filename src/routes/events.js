@@ -1,6 +1,7 @@
 import express from 'express';
 import { z } from 'zod';
 import { userClient } from '../lib/supabase.js';
+import { AppError, ErrorCodes } from '../lib/errors.js';
 import { loadWorkspace } from '../middleware/workspace.js';
 import { validate } from '../middleware/validate.js';
 
@@ -90,25 +91,86 @@ router.post(
     try {
       const { attendeeIds, ...eventData } = req.body;
       const supabase = userClient(req.jwt);
+      const eventValues = {
+        ...(eventData.id ? { id: eventData.id } : {}),
+        workspace_id: req.params.workspaceId,
+        title: eventData.title,
+        description: eventData.description ?? '',
+        starts_at: eventData.startsAt,
+        ends_at: eventData.endsAt,
+        all_day: eventData.allDay ?? false,
+        color: eventData.color ?? '#3B82F6',
+        reminder_minutes_before: eventData.reminderMinutesBefore ?? 15,
+        created_by: req.user.id,
+      };
 
-      const { data: event, error } = await supabase
-        .from('events')
-        .insert({
-          ...eventData,
-          workspace_id: req.params.workspaceId,
-          created_by: req.user.id,
-        })
-        .select()
-        .single();
+      let event;
+      if (eventData.id) {
+        const { data: existing, error: lookupError } = await supabase
+          .from('events')
+          .select()
+          .eq('id', eventData.id)
+          .maybeSingle();
+        if (lookupError) throw lookupError;
+        if (existing) {
+          const matchesRequest = [
+            'workspace_id',
+            'title',
+            'description',
+            'all_day',
+            'color',
+            'reminder_minutes_before',
+            'created_by',
+          ].every(key => existing[key] === eventValues[key]) &&
+            new Date(existing.starts_at).getTime() ===
+              new Date(eventValues.starts_at).getTime() &&
+            new Date(existing.ends_at).getTime() ===
+              new Date(eventValues.ends_at).getTime();
+          if (!matchesRequest) {
+            throw new AppError(
+              ErrorCodes.CONFLICT,
+              'This event ID is already used by another operation',
+              409,
+            );
+          }
+          event = existing;
+        }
+      }
 
-      if (error) throw error;
+      if (!event) {
+        const { data: createdEvent, error } = await supabase
+          .from('events')
+          .insert(eventValues)
+          .select()
+          .single();
+        if (error) throw error;
+        event = createdEvent;
+      }
 
       if (attendeeIds && attendeeIds.length > 0) {
+        const { data: members, error: membersError } = await supabase
+          .from('workspace_members')
+          .select('user_id')
+          .eq('workspace_id', req.params.workspaceId)
+          .in('user_id', attendeeIds);
+        if (membersError) throw membersError;
+        const memberIds = new Set((members || []).map(member => member.user_id));
+        if (attendeeIds.some(userId => !memberIds.has(userId))) {
+          throw new AppError(
+            ErrorCodes.FORBIDDEN,
+            'Attendees must be workspace members',
+            400,
+          );
+        }
+
         const attendees = attendeeIds.map(userId => ({
           event_id: event.id,
           user_id: userId,
         }));
-        await supabase.from('event_attendees').insert(attendees);
+        const { error: attendeeError } = await supabase
+          .from('event_attendees')
+          .upsert(attendees, { onConflict: 'event_id,user_id', ignoreDuplicates: true });
+        if (attendeeError) throw attendeeError;
       }
 
       res.status(201).json({ event });
@@ -124,26 +186,75 @@ router.post(
  */
 itemRouter.patch('/events/:eventId', validate(updateEventSchema), async (req, res, next) => {
   try {
-    const { attendeeIds, ...updates } = req.body;
+    const {
+      attendeeIds,
+      startsAt,
+      endsAt,
+      allDay,
+      reminderMinutesBefore,
+      ...updates
+    } = req.body;
+    if (startsAt !== undefined) updates.starts_at = startsAt;
+    if (endsAt !== undefined) updates.ends_at = endsAt;
+    if (allDay !== undefined) updates.all_day = allDay;
+    if (reminderMinutesBefore !== undefined) {
+      updates.reminder_minutes_before = reminderMinutesBefore;
+    }
     const supabase = userClient(req.jwt);
 
-    const { data: event, error } = await supabase
-      .from('events')
-      .update(updates)
-      .eq('id', req.params.eventId)
-      .select()
-      .single();
+    let event;
+    if (Object.keys(updates).length > 0) {
+      const { data, error } = await supabase
+        .from('events')
+        .update(updates)
+        .eq('id', req.params.eventId)
+        .select()
+        .single();
 
-    if (error) throw error;
+      if (error) throw error;
+      event = data;
+    } else {
+      const { data, error } = await supabase
+        .from('events')
+        .select()
+        .eq('id', req.params.eventId)
+        .single();
+
+      if (error) throw error;
+      event = data;
+    }
 
     if (attendeeIds !== undefined) {
-      await supabase.from('event_attendees').delete().eq('event_id', req.params.eventId);
+      const { data: members, error: membersError } = await supabase
+        .from('workspace_members')
+        .select('user_id')
+        .eq('workspace_id', event.workspace_id)
+        .in('user_id', attendeeIds);
+      if (membersError) throw membersError;
+      const memberIds = new Set((members || []).map(member => member.user_id));
+      if (attendeeIds.some(userId => !memberIds.has(userId))) {
+        throw new AppError(
+          ErrorCodes.FORBIDDEN,
+          'Attendees must be workspace members',
+          400,
+        );
+      }
+
+      const { error: deleteError } = await supabase
+        .from('event_attendees')
+        .delete()
+        .eq('event_id', req.params.eventId);
+      if (deleteError) throw deleteError;
+
       if (attendeeIds.length > 0) {
         const attendees = attendeeIds.map(userId => ({
           event_id: event.id,
           user_id: userId,
         }));
-        await supabase.from('event_attendees').insert(attendees);
+        const { error: insertError } = await supabase
+          .from('event_attendees')
+          .insert(attendees);
+        if (insertError) throw insertError;
       }
     }
 

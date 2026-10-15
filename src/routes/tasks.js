@@ -34,6 +34,7 @@ const createTaskSchema = z.object({
   assigneeId: z.string().uuid().optional(),
   labelId: z.string().uuid().optional(),
   subtasks: z.array(z.object({
+    id: z.string().uuid().optional(),
     title: z.string().min(1).max(500),
   })).optional(),
   attachmentFileIds: z.array(z.string().uuid()).optional(),
@@ -60,6 +61,7 @@ const moveTaskSchema = z.object({
 });
 
 const createSubtaskSchema = z.object({
+  id: z.string().uuid().optional(),
   title: z.string().min(1).max(500),
 });
 
@@ -71,6 +73,7 @@ const updateSubtaskSchema = z.object({
 });
 
 const createCommentSchema = z.object({
+  id: z.string().uuid().optional(),
   body: z.string().min(1).max(2000),
 });
 
@@ -232,35 +235,89 @@ router.post(
         }
       }
 
-      // Create task
-      const { data: task, error: taskError } = await supabase
-        .from('tasks')
-        .insert({
-          ...(id && { id }),
-          workspace_id: req.params.workspaceId,
-          title,
-          description,
-          priority,
-          due_at: dueAt,
-          reminder_minutes_before: reminderMinutesBefore,
-          assignee_id: assigneeId,
-          label_id: labelId,
-          created_by: req.user.id,
-        })
-        .select()
-        .single();
+      let task;
+      if (id) {
+        const { data: existing, error: lookupError } = await supabase
+          .from('tasks')
+          .select()
+          .eq('id', id)
+          .maybeSingle();
+        if (lookupError) throw lookupError;
 
-      if (taskError) throw taskError;
+        if (existing) {
+          if (
+            existing.workspace_id !== req.params.workspaceId ||
+            existing.created_by !== req.user.id ||
+            existing.title !== title
+          ) {
+            throw new AppError(
+              ErrorCodes.CONFLICT,
+              'This task ID is already used by another operation',
+              409,
+            );
+          }
+          task = existing;
+        }
+      }
+
+      // Client-supplied task IDs make offline retries idempotent.
+      if (!task) {
+        const { data: createdTask, error: taskError } = await supabase
+          .from('tasks')
+          .insert({
+            ...(id && { id }),
+            workspace_id: req.params.workspaceId,
+            title,
+            description,
+            priority,
+            due_at: dueAt,
+            reminder_minutes_before: reminderMinutesBefore,
+            assignee_id: assigneeId,
+            label_id: labelId,
+            created_by: req.user.id,
+          })
+          .select()
+          .single();
+
+        if (taskError) throw taskError;
+        task = createdTask;
+      }
 
       // Create subtasks if provided
       if (subtasks && subtasks.length > 0) {
-        const subtaskInserts = subtasks.map((st, index) => ({
-          task_id: task.id,
-          title: st.title,
-          position: index,
-        }));
+        for (const [index, subtask] of subtasks.entries()) {
+          if (subtask.id) {
+            const { data: existing, error: lookupError } = await supabase
+              .from('subtasks')
+              .select()
+              .eq('id', subtask.id)
+              .maybeSingle();
+            if (lookupError) throw lookupError;
+            if (existing) {
+              if (
+                existing.task_id !== task.id ||
+                existing.title !== subtask.title
+              ) {
+                throw new AppError(
+                  ErrorCodes.CONFLICT,
+                  'This subtask ID is already used by another operation',
+                  409,
+                );
+              }
+              continue;
+            }
+          }
 
-        await supabase.from('subtasks').insert(subtaskInserts);
+          const { error: subtaskError } = await supabase
+            .from('subtasks')
+            .insert({
+              ...(subtask.id ? { id: subtask.id } : {}),
+              task_id: task.id,
+              title: subtask.title,
+              position: index,
+            });
+          if (subtaskError) throw subtaskError;
+        }
       }
 
       // Attach files if provided
@@ -349,17 +406,45 @@ router.patch(
       const supabase = userClient(req.jwt);
 
       // Get current task state
-      const { data: currentTask } = await supabase
+      const { data: currentTask, error: currentTaskError } = await supabase
         .from('tasks')
-        .select('assignee_id, status, created_by')
+        .select('assignee_id, status, created_by, workspace_id')
         .eq('id', req.params.taskId)
         .single();
+      if (currentTaskError) throw currentTaskError;
 
       // Update task
-      const { reminderMinutesBefore, ...updates } = req.body;
+      const {
+        dueAt,
+        reminderMinutesBefore,
+        assigneeId,
+        labelId,
+        ...updates
+      } = req.body;
+      if (dueAt !== undefined) updates.due_at = dueAt;
       if (reminderMinutesBefore !== undefined) {
         updates.reminder_minutes_before = reminderMinutesBefore;
       }
+      if (assigneeId !== undefined) {
+        if (assigneeId !== null) {
+          const { data: member, error: memberError } = await supabase
+            .from('workspace_members')
+            .select('user_id')
+            .eq('workspace_id', currentTask.workspace_id)
+            .eq('user_id', assigneeId)
+            .maybeSingle();
+          if (memberError) throw memberError;
+          if (!member) {
+            throw new AppError(
+              ErrorCodes.FORBIDDEN,
+              'Assignee must be a workspace member',
+              400,
+            );
+          }
+        }
+        updates.assignee_id = assigneeId;
+      }
+      if (labelId !== undefined) updates.label_id = labelId;
 
       const { data: task, error } = await supabase
         .from('tasks')
@@ -418,12 +503,17 @@ router.delete('/tasks/:taskId', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
 
-    const { error } = await supabase
+    const { data: deletedTask, error } = await supabase
       .from('tasks')
       .update({ deleted_at: new Date().toISOString() })
-      .eq('id', req.params.taskId);
+      .eq('id', req.params.taskId)
+      .select('id')
+      .maybeSingle();
 
     if (error) throw error;
+    if (!deletedTask) {
+      throw new AppError(ErrorCodes.TASK_NOT_FOUND, 'Task not found', 404);
+    }
 
     res.status(204).send();
   } catch (error) {
@@ -446,19 +536,25 @@ router.post('/tasks/bulk', validate(bulkActionSchema), async (req, res, next) =>
     for (const id of ids) {
       try {
         if (action === 'complete') {
-          const { error } = await supabase
+          const { data: task, error } = await supabase
             .from('tasks')
             .update({ status: 'completed' })
-            .eq('id', id);
+            .eq('id', id)
+            .select('id')
+            .maybeSingle();
 
           if (error) throw error;
+          if (!task) throw new AppError(ErrorCodes.TASK_NOT_FOUND, 'Task not found', 404);
         } else if (action === 'delete') {
-          const { error } = await supabase
+          const { data: task, error } = await supabase
             .from('tasks')
             .update({ deleted_at: new Date().toISOString() })
-            .eq('id', id);
+            .eq('id', id)
+            .select('id')
+            .maybeSingle();
 
           if (error) throw error;
+          if (!task) throw new AppError(ErrorCodes.TASK_NOT_FOUND, 'Task not found', 404);
         }
 
         succeeded.push(id);
@@ -517,8 +613,27 @@ router.post(
   validate(createSubtaskSchema),
   async (req, res, next) => {
     try {
-      const { title } = req.body;
+      const { id, title } = req.body;
       const supabase = userClient(req.jwt);
+
+      if (id) {
+        const { data: existing, error: lookupError } = await supabase
+          .from('subtasks')
+          .select()
+          .eq('id', id)
+          .maybeSingle();
+        if (lookupError) throw lookupError;
+        if (existing) {
+          if (existing.task_id !== req.params.taskId || existing.title !== title) {
+            throw new AppError(
+              ErrorCodes.CONFLICT,
+              'This subtask ID is already used by another operation',
+              409,
+            );
+          }
+          return res.status(201).json({ subtask: existing });
+        }
+      }
 
       // Get max position
       const { data: maxPos } = await supabase
@@ -534,6 +649,7 @@ router.post(
       const { data: subtask, error } = await supabase
         .from('subtasks')
         .insert({
+          ...(id ? { id } : {}),
           task_id: req.params.taskId,
           title,
           position,
@@ -561,9 +677,12 @@ router.patch(
     try {
       const supabase = userClient(req.jwt);
 
+      const { done, ...updates } = req.body;
+      if (done !== undefined) updates.is_done = done;
+
       const { data: subtask, error } = await supabase
         .from('subtasks')
-        .update(req.body)
+        .update(updates)
         .eq('id', req.params.subtaskId)
         .select()
         .single();
@@ -644,20 +763,45 @@ router.post(
   validate(createCommentSchema),
   async (req, res, next) => {
     try {
-      const { body } = req.body;
+      const { id, body } = req.body;
       const supabase = userClient(req.jwt);
 
+      if (id) {
+        const { data: existing, error: lookupError } = await supabase
+          .from('task_comments')
+          .select()
+          .eq('id', id)
+          .maybeSingle();
+        if (lookupError) throw lookupError;
+        if (existing) {
+          if (
+            existing.task_id !== req.params.taskId ||
+            existing.author_id !== req.user.id ||
+            existing.body !== body
+          ) {
+            throw new AppError(
+              ErrorCodes.CONFLICT,
+              'This comment ID is already used by another operation',
+              409,
+            );
+          }
+          return res.status(201).json({ comment: existing });
+        }
+      }
+
       // Get task info
-      const { data: task } = await supabase
+      const { data: task, error: taskError } = await supabase
         .from('tasks')
         .select('assignee_id, created_by, workspace_id')
         .eq('id', req.params.taskId)
         .single();
+      if (taskError) throw taskError;
 
       // Create comment
       const { data: comment, error } = await supabase
         .from('task_comments')
         .insert({
+          ...(id ? { id } : {}),
           task_id: req.params.taskId,
           author_id: req.user.id,
           body,
