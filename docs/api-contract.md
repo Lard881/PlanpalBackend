@@ -252,6 +252,7 @@ Admin only.
       "status": "todo",
       "priority": "high",
       "due_at": "2026-10-20T17:00:00.000Z",
+      "reminder_minutes_before": 60,
       "assignee_id": "uuid",
       "label_id": "uuid",
       "created_by": "uuid",
@@ -280,6 +281,7 @@ Admin only.
   "description": "Venue, date, agenda...",
   "priority": "high",
   "dueAt": "2026-10-20T17:00:00.000Z",
+  "reminderMinutesBefore": 60,
   "assigneeId": "uuid",
   "labelId": "uuid",
   "subtasks": [{ "title": "Book venue" }],
@@ -287,6 +289,7 @@ Admin only.
 }
 ```
 `id` is optional (client-generated for offline use; idempotent on repeat).
+`reminderMinutesBefore` is optional and nullable. Values must be whole minutes >= 5; `null` or omission uses the default reminder 24 hours before the due time.
 
 **Response 201** `{ "task": { ...same shape as list row... } }`
 
@@ -314,7 +317,7 @@ Admin only.
 
 ## PATCH /tasks/:taskId
 
-**Request body** (all optional): `title` `description` `priority` `status` `dueAt` `assigneeId` `labelId`
+**Request body** (all optional): `title` `description` `priority` `status` `dueAt` `reminderMinutesBefore` `assigneeId` `labelId`. `reminderMinutesBefore` is nullable; `null` resets to the default 24-hour reminder.
 
 **Response 200** `{ "task": { ... } }`
 

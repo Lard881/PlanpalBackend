@@ -30,6 +30,7 @@ const createTaskSchema = z.object({
   description: z.string().max(5000).optional(),
   priority: z.enum(['low', 'medium', 'high']).optional(),
   dueAt: z.string().datetime().optional(),
+  reminderMinutesBefore: z.number().int().min(5).nullable().optional(),
   assigneeId: z.string().uuid().optional(),
   labelId: z.string().uuid().optional(),
   subtasks: z.array(z.object({
@@ -44,6 +45,7 @@ const updateTaskSchema = z.object({
   priority: z.enum(['low', 'medium', 'high']).optional(),
   status: z.enum(['todo', 'in_progress', 'completed']).optional(),
   dueAt: z.string().datetime().optional().nullable(),
+  reminderMinutesBefore: z.number().int().min(5).nullable().optional(),
   assigneeId: z.string().uuid().optional().nullable(),
   labelId: z.string().uuid().optional().nullable(),
 });
@@ -105,7 +107,7 @@ router.get(
       let query = supabase
         .from('tasks')
         .select(`
-          id, title, description, status, priority, due_at,
+          id, title, description, status, priority, due_at, reminder_minutes_before,
           created_at, updated_at,
           assignee:profiles!assignee_id(id, full_name, avatar_url),
           label:labels(id, name, color)
@@ -204,6 +206,7 @@ router.post(
         description,
         priority = 'medium',
         dueAt,
+        reminderMinutesBefore,
         assigneeId,
         labelId,
         subtasks,
@@ -239,6 +242,7 @@ router.post(
           description,
           priority,
           due_at: dueAt,
+          reminder_minutes_before: reminderMinutesBefore,
           assignee_id: assigneeId,
           label_id: labelId,
           created_by: req.user.id,
@@ -352,9 +356,14 @@ router.patch(
         .single();
 
       // Update task
+      const { reminderMinutesBefore, ...updates } = req.body;
+      if (reminderMinutesBefore !== undefined) {
+        updates.reminder_minutes_before = reminderMinutesBefore;
+      }
+
       const { data: task, error } = await supabase
         .from('tasks')
-        .update(req.body)
+        .update(updates)
         .eq('id', req.params.taskId)
         .select()
         .single();
