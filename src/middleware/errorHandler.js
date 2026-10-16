@@ -101,7 +101,11 @@ function translateDatabaseError(err) {
   
   // Custom function errors (raise exception with errcode P0001 or P0002)
   if (err.code === 'P0001' || err.code === 'P0002') {
-    if (err.message?.includes('last admin')) {
+    const message = err.message?.toLowerCase() ?? '';
+    if (
+      message.includes('last admin') ||
+      message.includes('keep at least one admin')
+    ) {
       return {
         statusCode: 403,
         errorCode: ErrorCodes.LAST_ADMIN,

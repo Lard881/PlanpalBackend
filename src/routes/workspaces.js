@@ -347,17 +347,7 @@ router.patch(
         .select()
         .single();
       
-      if (error) {
-        // Check for LAST_ADMIN protection trigger
-        if (error.message?.includes('last admin')) {
-          throw new AppError(
-            ErrorCodes.LAST_ADMIN,
-            'Cannot demote the last admin',
-            403
-          );
-        }
-        throw error;
-      }
+      if (error) throw error;
       
       res.json({ member });
     } catch (error) {
