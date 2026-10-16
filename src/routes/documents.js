@@ -189,7 +189,9 @@ router.get('/documents', loadWorkspace, validate(listDocsQuerySchema, 'query'), 
 
     let query = supabase
       .from('documents')
-      .select('id, kind, title, folder_id, file_id, created_at, updated_at')
+      .select(
+        'id, workspace_id, created_by, kind, title, folder_id, file_id, created_at, updated_at',
+      )
       .eq('workspace_id', req.params.workspaceId)
       .is('deleted_at', null);
 

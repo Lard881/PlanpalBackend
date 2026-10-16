@@ -16,7 +16,7 @@ const eventsQuerySchema = z.object({
   const from = new Date(data.from);
   const to = new Date(data.to);
   const diffDays = (to - from) / (1000 * 60 * 60 * 24);
-  return diffDays <= 62;
+  return diffDays >= 0 && diffDays <= 62;
 }, { message: 'Date range cannot exceed 62 days' });
 
 const createEventSchema = z.object({
@@ -29,7 +29,10 @@ const createEventSchema = z.object({
   description: z.string().max(2000).optional(),
   attendeeIds: z.array(z.string().uuid()).optional(),
   reminderMinutesBefore: z.number().int().min(0).optional(),
-});
+}).refine(
+  data => new Date(data.endsAt) > new Date(data.startsAt),
+  { message: 'Event end must be after its start', path: ['endsAt'] },
+);
 
 const updateEventSchema = z.object({
   title: z.string().min(1).max(200).optional(),
@@ -55,7 +58,7 @@ router.get(
       const { from, to } = req.query;
       const supabase = userClient(req.jwt);
 
-      const [{ data: events }, { data: dueTasks }] = await Promise.all([
+      const [eventsResult, dueTasksResult] = await Promise.all([
         supabase
           .from('events')
           .select('*, event_attendees(user_id, profiles(full_name, avatar_url))')
@@ -71,8 +74,13 @@ router.get(
           .lte('due_at', to)
           .is('deleted_at', null),
       ]);
+      if (eventsResult.error) throw eventsResult.error;
+      if (dueTasksResult.error) throw dueTasksResult.error;
 
-      res.json({ events: events || [], dueTasks: dueTasks || [] });
+      res.json({
+        events: eventsResult.data || [],
+        dueTasks: dueTasksResult.data || [],
+      });
     } catch (error) {
       next(error);
     }
