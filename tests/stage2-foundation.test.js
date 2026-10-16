@@ -9,7 +9,7 @@
  * - /me endpoint (GET and PATCH)
  */
 
-import { describe, test, expect, beforeAll, afterAll } from '@jest/globals';
+import { describe, test, expect, beforeAll, afterAll, jest } from '@jest/globals';
 import { createClient } from '@supabase/supabase-js';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
@@ -24,6 +24,8 @@ import {
 
 logSkip('Stage 2 tests');
 
+jest.setTimeout(30000);
+
 (skipTests ? describe.skip : describe)('Stage 2: Backend Foundation', () => {
   let app;
   let supabaseAdmin;
@@ -34,6 +36,18 @@ logSkip('Stage 2 tests');
   beforeAll(async () => {
     app = createApp();
     supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+    const { data: bucket, error: bucketError } =
+      await supabaseAdmin.storage.getBucket('planpal-files');
+    if (bucketError && String(bucketError.statusCode) !== '404') {
+      throw bucketError;
+    }
+    if (!bucket) {
+      const { error: createBucketError } =
+        await supabaseAdmin.storage.createBucket('planpal-files', {
+          public: false,
+        });
+      if (createBucketError) throw createBucketError;
+    }
 
     // Create a test user
     testUserEmail = `test-${Date.now()}@planpal.test`;

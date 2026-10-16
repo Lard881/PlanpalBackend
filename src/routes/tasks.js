@@ -18,7 +18,7 @@ const taskQuerySchema = z.object({
   dueTo: z.string().datetime().optional(),
   q: z.string().optional(),
   view: z.enum(['today', 'week', 'overdue', 'all']).optional(),
-  sort: z.enum(['due_at', 'priority', 'created_at', 'title']).optional(),
+  sort: z.enum(['due_at', 'priority', 'created_at', 'updated_at', 'title']).optional(),
   order: z.enum(['asc', 'desc']).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   cursor: z.string().optional(),
@@ -68,7 +68,8 @@ const createSubtaskSchema = z.object({
 const updateSubtaskSchema = z.object({
   title: z.string().min(1).max(500).optional(),
   done: z.boolean().optional(),
-}).refine(data => data.title !== undefined || data.done !== undefined, {
+  position: z.number().int().min(0).optional(),
+}).refine(data => data.title !== undefined || data.done !== undefined || data.position !== undefined, {
   message: 'At least one field must be provided',
 });
 
@@ -80,6 +81,40 @@ const createCommentSchema = z.object({
 const createAttachmentSchema = z.object({
   fileId: z.string().uuid(),
 });
+
+function encodeTaskCursor(task, sort, order) {
+  return Buffer.from(
+    JSON.stringify({ value: task[sort], id: task.id, sort, order }),
+  ).toString('base64url');
+}
+
+function decodeTaskCursor(cursor, sort, order) {
+  try {
+    const decoded = JSON.parse(
+      Buffer.from(cursor, 'base64url').toString('utf8'),
+    );
+    if (
+      typeof decoded.id !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(decoded.id) ||
+      !(decoded.value === null || typeof decoded.value === 'string') ||
+      decoded.sort !== sort ||
+      decoded.order !== order
+    ) {
+      throw new Error('Malformed cursor');
+    }
+    return decoded;
+  } catch {
+    throw new AppError(
+      ErrorCodes.VALIDATION_FAILED,
+      'Invalid task cursor',
+      400,
+    );
+  }
+}
+
+function escapePostgrestValue(value) {
+  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
 
 /**
  * GET /workspaces/:workspaceId/tasks
@@ -102,15 +137,18 @@ router.get(
         q,
         view,
         sort = 'created_at',
-        order = 'desc',
+        order,
         limit = 30,
         cursor,
       } = req.query;
+      const sortOrder =
+        order ?? (sort === 'due_at' || sort === 'title' ? 'asc' : 'desc');
 
       let query = supabase
         .from('tasks')
         .select(`
-          id, title, description, status, priority, due_at, reminder_minutes_before,
+          id, workspace_id, created_by, assignee_id, label_id, completed_at,
+          title, description, status, priority, due_at, reminder_minutes_before,
           created_at, updated_at,
           assignee:profiles!assignee_id(id, full_name, avatar_url),
           label:labels(id, name, color)
@@ -144,11 +182,24 @@ router.get(
 
       // Cursor pagination
       if (cursor) {
-        query = query.lt(sort, cursor);
+        const { value, id } = decodeTaskCursor(cursor, sort, sortOrder);
+        const operator = sortOrder === 'asc' ? 'gt' : 'lt';
+        if (value === null) {
+          query = query.or(`and(${sort}.is.null,id.${operator}.${id})`);
+        } else {
+          const escapedValue = escapePostgrestValue(value);
+          query = query.or([
+            `${sort}.${operator}.${escapedValue}`,
+            `and(${sort}.eq.${escapedValue},id.${operator}.${id})`,
+            `${sort}.is.null`,
+          ].join(','));
+        }
       }
 
       // Sorting
-      query = query.order(sort, { ascending: order === 'asc' })
+      query = query
+        .order(sort, { ascending: sortOrder === 'asc', nullsFirst: false })
+        .order('id', { ascending: sortOrder === 'asc' })
         .limit(limit + 1); // Fetch one extra to determine if there are more
 
       const { data: tasks, error, count } = await query;
@@ -157,13 +208,15 @@ router.get(
       // Check if there are more results
       const hasMore = tasks.length > limit;
       const results = hasMore ? tasks.slice(0, limit) : tasks;
-      const nextCursor = hasMore ? results[results.length - 1][sort] : null;
+      const nextCursor = hasMore
+        ? encodeTaskCursor(results[results.length - 1], sort, sortOrder)
+        : null;
 
       // Get subtask counts for each task
       const taskIds = results.map(t => t.id);
       const { data: subtaskCounts } = await supabase
         .from('subtasks')
-        .select('task_id, done')
+        .select('task_id, is_done')
         .in('task_id', taskIds)
         .is('deleted_at', null);
 
@@ -174,7 +227,7 @@ router.get(
           countsByTask[s.task_id] = { done: 0, total: 0 };
         }
         countsByTask[s.task_id].total++;
-        if (s.done) countsByTask[s.task_id].done++;
+        if (s.is_done) countsByTask[s.task_id].done++;
       });
 
       // Attach counts to tasks
@@ -366,8 +419,8 @@ router.get('/tasks/:taskId', async (req, res, next) => {
         *,
         assignee:profiles!assignee_id(id, full_name, email, avatar_url),
         label:labels(id, name, color),
-        subtasks(id, title, done, position, created_at),
-        task_attachments(file_id, files(id, name, mime_type, size_bytes, created_at))
+        subtasks(id, task_id, title, is_done, position, created_at),
+        task_attachments(file_id, files(id, name, mime_type, size_bytes, storage_path, created_at))
       `)
       .eq('id', req.params.taskId)
       .single();
@@ -378,7 +431,7 @@ router.get('/tasks/:taskId', async (req, res, next) => {
     const { data: comments } = await supabase
       .from('task_comments')
       .select(`
-        id, body, created_at, updated_at,
+        id, task_id, author_id, body, created_at, updated_at,
         author:profiles!author_id(id, full_name, avatar_url)
       `)
       .eq('task_id', req.params.taskId)

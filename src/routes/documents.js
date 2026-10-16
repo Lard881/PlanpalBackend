@@ -26,6 +26,7 @@ const updateFolderSchema = z.object({
 });
 
 const createDocumentSchema = z.object({
+  id: z.string().uuid().optional(),
   kind: z.enum(['file', 'written']),
   title: z.string().min(1).max(200),
   fileId: z.string().uuid().optional(),
@@ -121,10 +122,14 @@ router.post('/folders', loadWorkspace, validate(createFolderSchema), async (req,
 itemRouter.patch('/folders/:folderId', validate(updateFolderSchema), async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
+    const update = {
+      ...(req.body.name !== undefined ? { name: req.body.name } : {}),
+      ...(req.body.parentId !== undefined ? { parent_id: req.body.parentId } : {}),
+    };
 
     const { data: folder, error } = await supabase
       .from('folders')
-      .update(req.body)
+      .update(update)
       .eq('id', req.params.folderId)
       .select()
       .single();
@@ -217,10 +222,26 @@ router.get('/documents', loadWorkspace, validate(listDocsQuerySchema, 'query'), 
  */
 router.post('/documents', loadWorkspace, validate(createDocumentSchema), async (req, res, next) => {
   try {
-    const { kind, title, fileId, content, contentText, folderId } = req.body;
+    const { id, kind, title, fileId, content, contentText, folderId } = req.body;
     const supabase = userClient(req.jwt);
 
+    if (id) {
+      const { data: existing, error: existingError } = await supabase
+        .from('documents')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle();
+      if (existingError) throw existingError;
+      if (existing) {
+        if (existing.workspace_id !== req.params.workspaceId) {
+          throw new AppError(ErrorCodes.FORBIDDEN, 'Document is outside this workspace', 403);
+        }
+        return res.json({ document: existing });
+      }
+    }
+
     const docData = {
+      ...(id ? { id } : {}),
       workspace_id: req.params.workspaceId,
       kind,
       title,
@@ -278,10 +299,16 @@ itemRouter.get('/documents/:documentId', async (req, res, next) => {
 itemRouter.patch('/documents/:documentId', validate(updateDocumentSchema), async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
+    const update = {
+      ...(req.body.title !== undefined ? { title: req.body.title } : {}),
+      ...(req.body.folderId !== undefined ? { folder_id: req.body.folderId } : {}),
+      ...(req.body.content !== undefined ? { content: req.body.content } : {}),
+      ...(req.body.contentText !== undefined ? { content_text: req.body.contentText } : {}),
+    };
 
     const { data: document, error } = await supabase
       .from('documents')
-      .update(req.body)
+      .update(update)
       .eq('id', req.params.documentId)
       .select()
       .single();

@@ -71,6 +71,7 @@ logSkip('Stage 5 tests');
       const personal = res.body.workspaces.find(w => w.type === 'personal');
       expect(personal).toBeDefined();
       expect(personal.role).toBe('admin');
+      expect(personal.createdBy).toBe(userId);
       
       personalWorkspaceId = personal.id;
     });

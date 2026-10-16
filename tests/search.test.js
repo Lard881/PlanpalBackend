@@ -14,6 +14,7 @@ import { createApp } from '../src/app.js';
 
 import {
   TEST_SUPABASE_URL as supabaseUrl,
+  TEST_SUPABASE_ANON_KEY as supabaseAnonKey,
   TEST_SUPABASE_SERVICE_KEY as supabaseServiceKey,
   skipDbTests as skipTests,
   logSkip,
@@ -24,6 +25,7 @@ logSkip('Search tests');
 (skipTests ? describe.skip : describe)('Stage 12: Search Tests (S12.2)', () => {
   let app;
   let supabase;
+  let authClient;
   let user1Token, user2Token, guestToken;
   let user1Id, user2Id, guestId;
   let workspace1Id, workspace2Id;
@@ -32,6 +34,9 @@ logSkip('Search tests');
   beforeAll(async () => {
     app = createApp();
     supabase = createClient(supabaseUrl, supabaseServiceKey);
+    authClient = createClient(supabaseUrl, supabaseAnonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
     // Create test users
     const { data: u1 } = await supabase.auth.admin.createUser({
@@ -56,51 +61,54 @@ logSkip('Search tests');
     guestId = guest.user.id;
 
     // Get tokens
-    const { data: session1 } = await supabase.auth.signInWithPassword({
+    const { data: session1 } = await authClient.auth.signInWithPassword({
       email: u1.user.email,
       password: 'password123',
     });
     user1Token = session1.session.access_token;
 
-    const { data: session2 } = await supabase.auth.signInWithPassword({
+    const { data: session2 } = await authClient.auth.signInWithPassword({
       email: u2.user.email,
       password: 'password123',
     });
     user2Token = session2.session.access_token;
 
-    const { data: sessionGuest } = await supabase.auth.signInWithPassword({
+    const { data: sessionGuest } = await authClient.auth.signInWithPassword({
       email: guest.user.email,
       password: 'password123',
     });
     guestToken = sessionGuest.session.access_token;
 
     // Get workspace IDs (created by signup trigger)
-    const { data: w1 } = await supabase
+    const { data: w1, error: workspace1Error } = await supabase
       .from('workspaces')
       .select('id')
       .eq('created_by', user1Id)
-      .eq('kind', 'personal')
+      .eq('type', 'personal')
       .single();
+    if (workspace1Error) throw workspace1Error;
     workspace1Id = w1.id;
 
-    const { data: w2 } = await supabase
+    const { data: w2, error: workspace2Error } = await supabase
       .from('workspaces')
       .select('id')
       .eq('created_by', user2Id)
-      .eq('kind', 'personal')
+      .eq('type', 'personal')
       .single();
+    if (workspace2Error) throw workspace2Error;
     workspace2Id = w2.id;
 
     // Create team workspace and add guest
-    const { data: team } = await supabase
+    const { data: team, error: teamError } = await supabase
       .from('workspaces')
       .insert({
         name: 'Search Test Team',
-        kind: 'team',
+        type: 'team',
         created_by: user1Id,
       })
       .select()
       .single();
+      if (teamError) throw teamError;
     const teamId = team.id;
 
     // Add guest to team
@@ -145,7 +153,7 @@ logSkip('Search tests');
       .from('documents')
       .insert({
         workspace_id: workspace1Id,
-        name: 'Searchable Document',
+        title: 'Searchable Document',
         kind: 'written',
         created_by: user1Id,
       })
@@ -200,7 +208,9 @@ logSkip('Search tests');
       expect(res.status).toBe(200);
       expect(res.body.results.length).toBeGreaterThan(0);
       
-      const taskResult = res.body.results.find(r => r.entity_type === 'task' && r.entity_id === task1Id);
+      const taskResult = res.body.results.find(
+        result => result.kind === 'task' && result.id === task1Id,
+      );
       expect(taskResult).toBeDefined();
       expect(taskResult.title).toContain('Alpha');
     });
@@ -212,7 +222,7 @@ logSkip('Search tests');
 
       expect(res.status).toBe(200);
       
-      const taskResult = res.body.results.find(r => r.entity_id === task2Id);
+      const taskResult = res.body.results.find(result => result.id === task2Id);
       expect(taskResult).toBeUndefined();
     });
 
@@ -233,7 +243,7 @@ logSkip('Search tests');
         .set('Authorization', `Bearer ${user1Token}`);
 
       expect(res.status).toBe(200);
-      expect(res.body.results.every(r => r.entity_type === 'task')).toBe(true);
+      expect(res.body.results.every(result => result.kind === 'task')).toBe(true);
       expect(res.body.counts.task).toBeGreaterThan(0);
     });
 
@@ -243,7 +253,9 @@ logSkip('Search tests');
         .set('Authorization', `Bearer ${user1Token}`);
 
       expect(res.status).toBe(200);
-      expect(res.body.results.every(r => r.entity_type === 'document')).toBe(true);
+      expect(res.body.results.every(result => result.kind === 'document')).toBe(
+        true,
+      );
     });
 
     test('can filter by type=person', async () => {
@@ -252,7 +264,9 @@ logSkip('Search tests');
         .set('Authorization', `Bearer ${user1Token}`);
 
       expect(res.status).toBe(200);
-      expect(res.body.results.every(r => r.entity_type === 'person')).toBe(true);
+      expect(res.body.results.every(result => result.kind === 'person')).toBe(
+        true,
+      );
     });
 
     test('type=all returns mixed results with counts', async () => {
@@ -285,7 +299,7 @@ logSkip('Search tests');
         .set('Authorization', `Bearer ${guestToken}`);
 
       expect(res.status).toBe(200);
-      const taskResult = res.body.results.find(r => r.entity_id === task1Id);
+      const taskResult = res.body.results.find(result => result.id === task1Id);
       expect(taskResult).toBeUndefined(); // Should not see user1's personal task
     });
   });
@@ -298,7 +312,7 @@ logSkip('Search tests');
 
       expect(res.status).toBe(200);
       
-      const personIds = res.body.results.map(r => r.entity_id);
+      const personIds = res.body.results.map(result => result.id);
       const uniqueIds = [...new Set(personIds)];
       
       expect(personIds.length).toBe(uniqueIds.length);
@@ -310,7 +324,7 @@ logSkip('Search tests');
         .from('workspaces')
         .insert({
           name: 'Shared Search Team',
-          kind: 'team',
+          type: 'team',
           created_by: user1Id,
         })
         .select()

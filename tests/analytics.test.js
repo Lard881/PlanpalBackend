@@ -14,6 +14,7 @@ import { createApp } from '../src/app.js';
 
 import {
   TEST_SUPABASE_URL as supabaseUrl,
+  TEST_SUPABASE_ANON_KEY as supabaseAnonKey,
   TEST_SUPABASE_SERVICE_KEY as supabaseServiceKey,
   skipDbTests as skipTests,
   logSkip,
@@ -24,13 +25,18 @@ logSkip('Analytics tests');
 (skipTests ? describe.skip : describe)('Stage 13: Analytics Tests (S13.4)', () => {
   let app;
   let supabase;
+  let authClient;
   let adminToken, memberToken, guestToken;
   let adminId, memberId, guestId;
   let workspaceId;
+  let workLabelId, personalLabelId;
 
   beforeAll(async () => {
     app = createApp();
     supabase = createClient(supabaseUrl, supabaseServiceKey);
+    authClient = createClient(supabaseUrl, supabaseAnonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
     // Create test users
     const { data: admin } = await supabase.auth.admin.createUser({
@@ -55,34 +61,35 @@ logSkip('Analytics tests');
     guestId = guest.user.id;
 
     // Get tokens
-    const { data: session1 } = await supabase.auth.signInWithPassword({
+    const { data: session1 } = await authClient.auth.signInWithPassword({
       email: admin.user.email,
       password: 'password123',
     });
     adminToken = session1.session.access_token;
 
-    const { data: session2 } = await supabase.auth.signInWithPassword({
+    const { data: session2 } = await authClient.auth.signInWithPassword({
       email: member.user.email,
       password: 'password123',
     });
     memberToken = session2.session.access_token;
 
-    const { data: session3 } = await supabase.auth.signInWithPassword({
+    const { data: session3 } = await authClient.auth.signInWithPassword({
       email: guest.user.email,
       password: 'password123',
     });
     guestToken = session3.session.access_token;
 
     // Create team workspace
-    const { data: workspace } = await supabase
+    const { data: workspace, error: workspaceError } = await supabase
       .from('workspaces')
       .insert({
         name: 'Analytics Test Team',
-        kind: 'team',
+        type: 'team',
         created_by: adminId,
       })
       .select()
       .single();
+    if (workspaceError) throw workspaceError;
     workspaceId = workspace.id;
 
     // Add member and guest
@@ -90,102 +97,130 @@ logSkip('Analytics tests');
       { workspace_id: workspaceId, user_id: memberId, role: 'member' },
       { workspace_id: workspaceId, user_id: guestId, role: 'guest' },
     ]);
+    const { data: labels, error: labelsError } = await supabase
+      .from('labels')
+      .insert([
+        { workspace_id: workspaceId, name: 'work', color: '#4F46E5' },
+        { workspace_id: workspaceId, name: 'personal', color: '#0EA5E9' },
+      ])
+      .select('id, name');
+    if (labelsError) throw labelsError;
+    workLabelId = labels.find(label => label.name === 'work').id;
+    personalLabelId = labels.find(label => label.name === 'personal').id;
 
     // Create fixture data with known values
     const now = new Date();
-    const yesterday = new Date(now);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const twoDaysAgo = new Date(now);
-    twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-    const threeDaysAgo = new Date(now);
-    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+    now.setUTCHours(12, 0, 0, 0);
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
+    const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
 
     // Insert test tasks
-    await supabase.from('tasks').insert([
-      // Completed today - 3 tasks
-      {
-        workspace_id: workspaceId,
-        title: 'Task 1 - Completed Today',
-        status: 'completed',
-        category: 'work',
-        created_by: adminId,
-        created_at: now.toISOString(),
-        completed_at: now.toISOString(),
-      },
-      {
-        workspace_id: workspaceId,
-        title: 'Task 2 - Completed Today',
-        status: 'completed',
-        category: 'personal',
-        created_by: adminId,
-        created_at: now.toISOString(),
-        completed_at: now.toISOString(),
-      },
-      {
-        workspace_id: workspaceId,
-        title: 'Task 3 - Completed Today',
-        status: 'completed',
-        category: 'work',
-        created_by: adminId,
-        created_at: now.toISOString(),
-        completed_at: now.toISOString(),
-      },
-      // Completed yesterday - 2 tasks
-      {
-        workspace_id: workspaceId,
-        title: 'Task 4 - Completed Yesterday',
-        status: 'completed',
-        category: 'work',
-        created_by: adminId,
-        created_at: yesterday.toISOString(),
-        completed_at: yesterday.toISOString(),
-      },
-      {
-        workspace_id: workspaceId,
-        title: 'Task 5 - Completed Yesterday',
-        status: 'completed',
-        category: 'personal',
-        created_by: adminId,
-        created_at: yesterday.toISOString(),
-        completed_at: yesterday.toISOString(),
-      },
-      // Completed 2 days ago - 1 task
-      {
-        workspace_id: workspaceId,
-        title: 'Task 6 - Completed 2 Days Ago',
-        status: 'completed',
-        category: 'work',
-        created_by: adminId,
-        created_at: twoDaysAgo.toISOString(),
-        completed_at: twoDaysAgo.toISOString(),
-      },
-      // In progress - 2 tasks
-      {
-        workspace_id: workspaceId,
-        title: 'Task 7 - In Progress',
-        status: 'in_progress',
-        category: 'work',
-        created_by: adminId,
-        created_at: now.toISOString(),
-      },
-      {
-        workspace_id: workspaceId,
-        title: 'Task 8 - In Progress',
-        status: 'in_progress',
-        category: 'personal',
-        created_by: adminId,
-        created_at: now.toISOString(),
-      },
-      // Todo - 1 task
-      {
-        workspace_id: workspaceId,
-        title: 'Task 9 - Todo',
-        status: 'todo',
-        category: 'work',
-        created_by: adminId,
-        created_at: now.toISOString(),
-      },
+    const { data: fixtureTasks, error: taskInsertError } = await supabase
+      .from('tasks')
+      .insert([
+        // Completed today - 3 tasks
+        {
+          workspace_id: workspaceId,
+          title: 'Task 1 - Completed Today',
+          status: 'completed',
+          label_id: workLabelId,
+          created_by: adminId,
+          created_at: now.toISOString(),
+        },
+        {
+          workspace_id: workspaceId,
+          title: 'Task 2 - Completed Today',
+          status: 'completed',
+          label_id: personalLabelId,
+          created_by: adminId,
+          created_at: now.toISOString(),
+        },
+        {
+          workspace_id: workspaceId,
+          title: 'Task 3 - Completed Today',
+          status: 'completed',
+          label_id: workLabelId,
+          created_by: adminId,
+          created_at: now.toISOString(),
+        },
+        // Completed yesterday - 2 tasks
+        {
+          workspace_id: workspaceId,
+          title: 'Task 4 - Completed Yesterday',
+          status: 'completed',
+          label_id: workLabelId,
+          created_by: adminId,
+          created_at: yesterday.toISOString(),
+        },
+        {
+          workspace_id: workspaceId,
+          title: 'Task 5 - Completed Yesterday',
+          status: 'completed',
+          label_id: personalLabelId,
+          created_by: adminId,
+          created_at: yesterday.toISOString(),
+        },
+        // Completed 2 days ago - 1 task
+        {
+          workspace_id: workspaceId,
+          title: 'Task 6 - Completed 2 Days Ago',
+          status: 'completed',
+          label_id: workLabelId,
+          created_by: adminId,
+          created_at: twoDaysAgo.toISOString(),
+        },
+        // In progress - 2 tasks
+        {
+          workspace_id: workspaceId,
+          title: 'Task 7 - In Progress',
+          status: 'in_progress',
+          label_id: workLabelId,
+          created_by: adminId,
+          created_at: now.toISOString(),
+        },
+        {
+          workspace_id: workspaceId,
+          title: 'Task 8 - In Progress',
+          status: 'in_progress',
+          label_id: personalLabelId,
+          created_by: adminId,
+          created_at: now.toISOString(),
+        },
+        // Todo - 1 task
+        {
+          workspace_id: workspaceId,
+          title: 'Task 9 - Todo',
+          status: 'todo',
+          label_id: workLabelId,
+          created_by: adminId,
+          created_at: now.toISOString(),
+        },
+      ])
+      .select('id, title');
+    if (taskInsertError) throw taskInsertError;
+    const completedAtByTitle = new Map([
+      ['Task 1 - Completed Today', now],
+      ['Task 2 - Completed Today', now],
+      ['Task 3 - Completed Today', now],
+      ['Task 4 - Completed Yesterday', yesterday],
+      ['Task 5 - Completed Yesterday', yesterday],
+      ['Task 6 - Completed 2 Days Ago', twoDaysAgo],
     ]);
+    const fixtureUpdates = [];
+    for (const task of fixtureTasks) {
+      const completedAt = completedAtByTitle.get(task.title);
+      if (!completedAt) continue;
+      fixtureUpdates.push(
+        supabase
+          .from('tasks')
+          .update({ completed_at: completedAt.toISOString() })
+          .eq('id', task.id),
+      );
+    }
+    const updateResults = await Promise.all(fixtureUpdates);
+    const failedUpdate = updateResults.find(({ error }) => error);
+    if (failedUpdate?.error) throw failedUpdate.error;
   });
 
   afterAll(async () => {
@@ -212,7 +247,7 @@ logSkip('Analytics tests');
         .set('Authorization', `Bearer ${guestToken}`);
 
       expect(res.status).toBe(403);
-      expect(res.body.error.code).toBe('INSUFFICIENT_PERMISSIONS');
+      expect(res.body.error.code).toBe('FORBIDDEN');
     });
 
     test('allows admin to view analytics', async () => {
@@ -248,10 +283,8 @@ logSkip('Analytics tests');
       const { summary } = res.body;
       
       // Expected: 6 completed tasks total (3 today + 2 yesterday + 1 two days ago)
-      expect(summary.completed_count).toBeGreaterThanOrEqual(6);
-      
-      // Expected: 9 total tasks created
-      expect(summary.created_count).toBeGreaterThanOrEqual(9);
+      expect(summary.completed).toBeGreaterThanOrEqual(6);
+      expect(summary.in_progress).toBeGreaterThanOrEqual(2);
     });
 
     test('category breakdown matches fixture data', async () => {
@@ -265,17 +298,17 @@ logSkip('Analytics tests');
       expect(Array.isArray(categories)).toBe(true);
 
       // Expected categories: 'work' and 'personal'
-      const workCategory = categories.find(c => c.category === 'work');
-      const personalCategory = categories.find(c => c.category === 'personal');
+      const workCategory = categories.find(c => c.label === 'work');
+      const personalCategory = categories.find(c => c.label === 'personal');
 
       // Work: 4 completed (Tasks 1, 3, 4, 6)
       if (workCategory) {
-        expect(workCategory.count).toBeGreaterThanOrEqual(4);
+        expect(workCategory.total).toBeGreaterThanOrEqual(4);
       }
 
       // Personal: 2 completed (Tasks 2, 5)
       if (personalCategory) {
-        expect(personalCategory.count).toBeGreaterThanOrEqual(2);
+        expect(personalCategory.total).toBeGreaterThanOrEqual(2);
       }
     });
 
@@ -353,7 +386,7 @@ logSkip('Analytics tests');
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toContain('text/csv');
       expect(res.headers['content-disposition']).toContain('analytics-7d.csv');
-      expect(res.text).toContain('Date,Completed Tasks,Created Tasks,Completion Rate');
+      expect(res.text.split('\n')[0]).toBe('Date,Completed Tasks');
     });
 
     test('member with full role can export CSV', async () => {
@@ -400,7 +433,7 @@ logSkip('Analytics tests');
       // Check format of first data row
       if (lines.length > 1) {
         const dataRow = lines[1].split(',');
-        expect(dataRow.length).toBe(4); // Date, Completed, Created, Rate
+        expect(dataRow.length).toBe(2); // Date, completed task count
       }
     });
   });
@@ -452,15 +485,16 @@ logSkip('Analytics tests');
   describe('Workspace Isolation', () => {
     test('cannot access analytics from non-member workspace', async () => {
       // Create another workspace
-      const { data: otherWorkspace } = await supabase
+      const { data: otherWorkspace, error: otherWorkspaceError } = await supabase
         .from('workspaces')
         .insert({
           name: 'Other Workspace',
-          kind: 'team',
+          type: 'team',
           created_by: memberId,
         })
         .select()
         .single();
+        if (otherWorkspaceError) throw otherWorkspaceError;
 
       const res = await request(app)
         .get(`/api/v1/workspaces/${otherWorkspace.id}/analytics`)

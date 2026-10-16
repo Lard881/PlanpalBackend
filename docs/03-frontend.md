@@ -70,7 +70,7 @@ Rules:
 
 **Windows (first)**
 - Use `window_manager`: minimum window size 900x600, remember size and position.
-- Google sign-in on desktop uses the browser: `supabase.auth.signInWithOAuth(google)` with a loopback redirect; the app listens on a local port until the redirect returns.
+- Google sign-in on desktop uses the browser: `supabase.auth.signInWithOAuth(google)` with a loopback redirect; the app listens on a local port until the redirect returns. Allow `http://127.0.0.1:*/auth/callback` in Supabase Auth's redirect URL allowlist.
 - Local notifications through `flutter_local_notifications` (Windows support). No FCM on Windows.
 - Keyboard shortcuts (section 10.13).
 - Use `sqlite3_flutter_libs` so Drift works on Windows.

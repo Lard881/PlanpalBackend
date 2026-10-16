@@ -261,6 +261,56 @@ jest.setTimeout(30000);
       expect(res.body.tasks[0].status).toBe('completed');
     });
 
+    it('should include every required task model field', async () => {
+      const res = await request(app)
+        .get(`/api/v1/workspaces/${workspaceId}/tasks?limit=1`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .expect(200);
+
+      expect(res.body.tasks[0]).toEqual(
+        expect.objectContaining({
+          id: expect.any(String),
+          workspace_id: workspaceId,
+          created_by: expect.any(String),
+          title: expect.any(String),
+          created_at: expect.any(String),
+          updated_at: expect.any(String),
+        }),
+      );
+    });
+
+    it('should reject obsolete client sort keys', async () => {
+      await request(app)
+        .get(`/api/v1/workspaces/${workspaceId}/tasks?sort=due_date`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .expect(400);
+    });
+
+    it('should sort task updates newest first', async () => {
+      const res = await request(app)
+        .get(`/api/v1/workspaces/${workspaceId}/tasks?sort=updated_at&limit=100`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .expect(200);
+      const updatedAt = res.body.tasks.map(task =>
+        new Date(task.updated_at).getTime(),
+      );
+
+      expect(updatedAt).toEqual([...updatedAt].sort((a, b) => b - a));
+    });
+
+    it('should sort due dates ascending by default', async () => {
+      const res = await request(app)
+        .get(`/api/v1/workspaces/${workspaceId}/tasks?sort=due_at&limit=100`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .expect(200);
+      const dueDates = res.body.tasks
+        .map(task => task.due_at)
+        .filter(Boolean)
+        .map(date => new Date(date).getTime());
+
+      expect(dueDates).toEqual([...dueDates].sort((a, b) => a - b));
+    });
+
     it('should filter tasks by priority', async () => {
       const res = await request(app)
         .get(`/api/v1/workspaces/${workspaceId}/tasks?priority=high`)
@@ -312,6 +362,51 @@ jest.setTimeout(30000);
         .expect(200);
 
       expect(res2.body.tasks.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('should not skip tasks when sort values are tied', async () => {
+      const tieTasks = Array.from({ length: 3 }, (_, index) => ({
+        workspace_id: workspaceId,
+        title: `Cursor tie regression ${index}`,
+        priority: 'medium',
+        created_by: userId,
+      }));
+      const { data: inserted, error } = await supabase
+        .from('tasks')
+        .insert(tieTasks)
+        .select('id');
+      if (error) throw error;
+      const expectedIds = inserted.map(task => task.id).sort();
+
+      const pageOne = await request(app)
+        .get(`/api/v1/workspaces/${workspaceId}/tasks`)
+        .query({
+          q: 'Cursor tie regression',
+          sort: 'priority',
+          order: 'asc',
+          limit: 2,
+        })
+        .set('Authorization', `Bearer ${authToken}`)
+        .expect(200);
+      const pageTwo = await request(app)
+        .get(`/api/v1/workspaces/${workspaceId}/tasks`)
+        .query({
+          q: 'Cursor tie regression',
+          sort: 'priority',
+          order: 'asc',
+          limit: 2,
+          cursor: pageOne.body.nextCursor,
+        })
+        .set('Authorization', `Bearer ${authToken}`)
+        .expect(200);
+
+      expect(pageOne.body.tasks).toHaveLength(2);
+      expect(pageTwo.body.tasks).toHaveLength(1);
+      expect(
+        [...pageOne.body.tasks, ...pageTwo.body.tasks]
+          .map(task => task.id)
+          .sort(),
+      ).toEqual(expectedIds);
     });
 
     it('should search tasks by title', async () => {
@@ -712,6 +807,46 @@ jest.setTimeout(30000);
       expect(res.body.subtask.is_done).toBe(true);
     });
 
+    it('should update subtask position', async () => {
+      const { data: subtask, error } = await supabase
+        .from('subtasks')
+        .insert({
+          task_id: parentTaskId,
+          title: 'Reorder Subtask',
+          position: 0,
+        })
+        .select()
+        .single();
+      if (error) throw error;
+
+      const res = await request(app)
+        .patch(`/api/v1/subtasks/${subtask.id}`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ position: 2 })
+        .expect(200);
+
+      expect(res.body.subtask.position).toBe(2);
+    });
+
+    it('should reject a negative subtask position', async () => {
+      const { data: subtask, error } = await supabase
+        .from('subtasks')
+        .insert({
+          task_id: parentTaskId,
+          title: 'Invalid Position Subtask',
+          position: 0,
+        })
+        .select()
+        .single();
+      if (error) throw error;
+
+      await request(app)
+        .patch(`/api/v1/subtasks/${subtask.id}`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({ position: -1 })
+        .expect(400);
+    });
+
     it('should create comment with mention', async () => {
       const res = await request(app)
         .post(`/api/v1/tasks/${parentTaskId}/comments`)
@@ -722,6 +857,25 @@ jest.setTimeout(30000);
         .expect(201);
 
       expect(res.body.comment.body).toContain('Admin');
+
+      const detail = await request(app)
+        .get(`/api/v1/tasks/${parentTaskId}`)
+        .set('Authorization', `Bearer ${authToken}`)
+        .expect(200);
+      const returnedComment = detail.body.task.comments.find(
+        comment => comment.id === res.body.comment.id,
+      );
+      expect(returnedComment).toEqual(
+        expect.objectContaining({
+          task_id: parentTaskId,
+          author_id: userId,
+        }),
+      );
+      expect(
+        detail.body.task.subtasks.every(
+          subtask => typeof subtask.is_done === 'boolean',
+        ),
+      ).toBe(true);
 
       // Check mention notification
       const { data: notifications } = await supabase

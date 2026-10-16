@@ -49,6 +49,7 @@ router.get('/', async (req, res, next) => {
           id,
           name,
           type,
+          created_by,
           created_at
         )
       `)
@@ -62,6 +63,7 @@ router.get('/', async (req, res, next) => {
       id: m.workspaces.id,
       name: m.workspaces.name,
       type: m.workspaces.type,
+      createdBy: m.workspaces.created_by,
       role: m.role,
       createdAt: m.workspaces.created_at,
     }));

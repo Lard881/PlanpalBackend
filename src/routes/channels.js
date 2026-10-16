@@ -51,6 +51,13 @@ router.get('/channels', loadWorkspace, async (req, res, next) => {
         400
       );
     }
+    if (!['admin', 'member'].includes(req.workspace.role)) {
+      throw new AppError(
+        ErrorCodes.FORBIDDEN,
+        'Only workspace members can create channels',
+        403
+      );
+    }
 
     const supabase = userClient(req.jwt);
 
@@ -160,9 +167,26 @@ router.post('/channels', loadWorkspace, validate(createChannelSchema), async (re
 
     const { name, description, isPrivate = false, memberIds = [] } = req.body;
     const supabase = userClient(req.jwt);
+    const requestedMembers = [...new Set(memberIds)]
+      .filter(userId => userId !== req.user.id);
+    if (requestedMembers.length > 0) {
+      const { data: workspaceMembers, error: workspaceMemberError } = await supabase
+        .from('workspace_members')
+        .select('user_id')
+        .eq('workspace_id', req.params.workspaceId)
+        .in('user_id', requestedMembers);
+      if (workspaceMemberError) throw workspaceMemberError;
+      const allowedIds = new Set((workspaceMembers || []).map(member => member.user_id));
+      if (requestedMembers.some(userId => !allowedIds.has(userId))) {
+        throw new AppError(
+          ErrorCodes.FORBIDDEN,
+          'Channel members must belong to this workspace',
+          403
+        );
+      }
+    }
 
-    // B2 fix: use kind:'channel' instead of is_dm:false
-    const { data: channel, error } = await supabase
+    const { data: channel, error } = await adminClient
       .from('channels')
       .insert({
         workspace_id: req.params.workspaceId,
@@ -179,10 +203,8 @@ router.post('/channels', loadWorkspace, validate(createChannelSchema), async (re
 
     // Add creator as member (use admin client to bypass RLS for batch)
     const members = [{ channel_id: channel.id, user_id: req.user.id }];
-    memberIds.forEach(userId => {
-      if (userId !== req.user.id) {
-        members.push({ channel_id: channel.id, user_id: userId });
-      }
+    requestedMembers.forEach(userId => {
+      members.push({ channel_id: channel.id, user_id: userId });
     });
 
     const { error: memberError } = await adminClient
@@ -203,6 +225,13 @@ router.post('/channels', loadWorkspace, validate(createChannelSchema), async (re
  */
 router.post('/dms', loadWorkspace, validate(createDmSchema), async (req, res, next) => {
   try {
+    if (req.workspace.type === 'personal') {
+      throw new AppError(
+        ErrorCodes.CHAT_NOT_AVAILABLE_IN_PERSONAL,
+        'Chat is not available in personal workspaces',
+        400
+      );
+    }
     const { userId } = req.body;
     const supabase = userClient(req.jwt);
 
@@ -294,7 +323,8 @@ itemRouter.get('/channels/:channelId/messages', validate(messagesQuerySchema, 'q
       .from('messages')
       .select(`
         id, body, file_id, created_at, updated_at, edited_at,
-        sender:profiles!messages_sender_id_fkey(id, full_name, avatar_url)
+        sender:profiles!messages_sender_id_fkey(id, full_name, avatar_url),
+        file:files!messages_file_id_fkey(id, name, mime_type, size_bytes)
       `)
       .eq('channel_id', req.params.channelId)
       .is('deleted_at', null)
@@ -330,7 +360,11 @@ itemRouter.post('/channels/:channelId/messages', validate(sendMessageSchema), as
     // Idempotency check
     const { data: existing } = await supabase
       .from('messages')
-      .select('id, body, created_at, sender_id')
+      .select(`
+        id, channel_id, body, file_id, created_at, updated_at, edited_at,
+        sender:profiles!messages_sender_id_fkey(id, full_name, avatar_url),
+        file:files!messages_file_id_fkey(id, name, mime_type, size_bytes)
+      `)
       .eq('id', id)
       .maybeSingle();
 
@@ -350,7 +384,8 @@ itemRouter.post('/channels/:channelId/messages', validate(sendMessageSchema), as
       })
       .select(`
         id, body, file_id, created_at, updated_at,
-        sender:profiles!messages_sender_id_fkey(id, full_name, avatar_url)
+        sender:profiles!messages_sender_id_fkey(id, full_name, avatar_url),
+        file:files!messages_file_id_fkey(id, name, mime_type, size_bytes)
       `)
       .single();
 

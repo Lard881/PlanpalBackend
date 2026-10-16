@@ -201,7 +201,7 @@ After a successful join, insert a `member_joined` notification for the workspace
 ### 6.4 Tasks
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/workspaces/:workspaceId/tasks` | Query: `status`, `priority`, `assigneeId`, `labelId`, `dueFrom`, `dueTo`, `q`, `view=today|week|overdue|all`, `sort=due_at|priority|created_at|title`, `order`, `limit`, `cursor`. `overdue` = not completed and `due_at < now()`. The list rows include `assignee {id, fullName, avatarPath}`, `label`, `subtaskCounts {done, total}`. |
+| GET | `/workspaces/:workspaceId/tasks` | Query: `status`, `priority`, `assigneeId`, `labelId`, `dueFrom`, `dueTo`, `q`, `view=today|week|overdue|all`, `sort=due_at|priority|created_at|updated_at|title`, `order`, `limit`, `cursor`. `overdue` = not completed and `due_at < now()`. The list rows include `assignee {id, fullName, avatarPath}`, `label`, `subtaskCounts {done, total}`. |
 | POST | `/workspaces/:workspaceId/tasks` | member. Body: `id?`, `title`, `description?`, `priority?`, `dueAt?`, `assigneeId?`, `labelId?`, `subtasks?[]`, `attachmentFileIds?[]`. Assignee must be a member of that workspace. If the assignee is not the creator, create a `task_assigned` notification. |
 | GET | `/tasks/:taskId` | Full task with subtasks, attachments (file metadata), comments (latest 20), assignee, label. Access decided by RLS. |
 | PATCH | `/tasks/:taskId` | Partial update. Detect assignee change and create `task_assigned` for the new assignee; status change notifies the creator (`task_updated`). |

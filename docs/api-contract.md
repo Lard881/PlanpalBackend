@@ -241,7 +241,7 @@ Admin only.
 
 ## GET /workspaces/:workspaceId/tasks
 
-**Query params** `status` `priority` `assigneeId` `labelId` `dueFrom` `dueTo` `q` `view=today|week|overdue|all` `sort=due_at|priority|created_at|title` `order=asc|desc` `limit` `cursor`
+**Query params** `status` `priority` `assigneeId` `labelId` `dueFrom` `dueTo` `q` `view=today|week|overdue|all` `sort=due_at|priority|created_at|updated_at|title` `order=asc|desc` `limit` `cursor`
 
 **Response 200**
 ```json
