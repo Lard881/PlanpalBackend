@@ -111,6 +111,8 @@ Deletes the account. Blocked if the user is the last admin of a team with other 
 
 **Response 200** `{ "workspaces": [ { "id", "name", "type", "role", "memberCount" } ] }`
 
+Soft-deleted workspaces are excluded.
+
 ---
 
 ## POST /workspaces

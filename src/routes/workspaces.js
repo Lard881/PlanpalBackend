@@ -53,6 +53,7 @@ router.get('/', async (req, res, next) => {
         )
       `)
       .eq('user_id', req.user.id)
+      .is('workspaces.deleted_at', null)
       .order('created_at', { ascending: false, foreignTable: 'workspaces' });
     
     if (error) throw error;
