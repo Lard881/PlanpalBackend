@@ -835,9 +835,10 @@ Date,Completed Tasks
 
 ---
 
-## GET /workspaces/:workspaceId/sync?since=
+## GET /workspaces/:workspaceId/sync?since=&cursor=
 
 `since`: ISO datetime (optional; omit for full sync).
+`cursor`: opaque continuation token returned as `nextCursor` when `hasMore` is true. Pass it on the next request to continue after the last row, including when many rows share the same timestamp. A cursor is scoped to the workspace in which it was issued.
 
 **Response 200**
 ```json
@@ -853,14 +854,15 @@ Date,Completed Tasks
   "channels": [ { "..." } ],
   "documents": [ { "..." } ],
   "folders": [ { "..." } ],
-  "members": [ { "workspace_id", "user_id", "role", "joined_at", "updated_at" } ],
+  "members": [ { "workspace_id", "user_id", "role", "joined_at", "updated_at", "deleted_at" } ],
   "profiles": [ { "id", "full_name", "email", "avatar_url" } ],
   "files": [ { "..." } ],
-  "hasMore": false
+  "hasMore": false,
+  "nextCursor": null
 }
 ```
 
-**Paging rule**: when `hasMore` is `true`, `serverTime` equals the largest `updated_at` among the rows returned (the cutoff). The app passes this as `since` on the next call. When `hasMore` is `false`, `serverTime` is captured before the queries and the app is fully up to date.
+**Paging rule**: when `hasMore` is `true`, continue using `nextCursor`; it applies an exclusive deterministic order by timestamp, collection and row key, so tied timestamps cannot stall or skip rows. `serverTime` reflects the last returned row's timestamp for compatibility, but must not be used instead of the cursor while paging. When `hasMore` is `false`, `serverTime` is captured before the queries. Membership removals are represented by a non-null `deleted_at` tombstone.
 
 Configurable page size: `SYNC_MAX_ROWS` env variable (default 1000).
 

@@ -24,9 +24,9 @@ const taskQuerySchema = z.object({
   cursor: z.string().optional(),
 });
 
-const createTaskSchema = z.object({
+export const createTaskSchema = z.object({
   id: z.string().uuid().optional(),
-  title: z.string().min(1).max(500),
+  title: z.string().min(1).max(200),
   description: z.string().max(5000).optional(),
   priority: z.enum(['low', 'medium', 'high']).optional(),
   dueAt: z.string().datetime().optional(),
@@ -35,13 +35,13 @@ const createTaskSchema = z.object({
   labelId: z.string().uuid().optional(),
   subtasks: z.array(z.object({
     id: z.string().uuid().optional(),
-    title: z.string().min(1).max(500),
+    title: z.string().min(1).max(200),
   })).optional(),
   attachmentFileIds: z.array(z.string().uuid()).optional(),
 });
 
-const updateTaskSchema = z.object({
-  title: z.string().min(1).max(500).optional(),
+export const updateTaskSchema = z.object({
+  title: z.string().min(1).max(200).optional(),
   description: z.string().max(5000).optional().nullable(),
   priority: z.enum(['low', 'medium', 'high']).optional(),
   status: z.enum(['todo', 'in_progress', 'completed']).optional(),
@@ -60,22 +60,22 @@ const moveTaskSchema = z.object({
   targetWorkspaceId: z.string().uuid(),
 });
 
-const createSubtaskSchema = z.object({
+export const createSubtaskSchema = z.object({
   id: z.string().uuid().optional(),
-  title: z.string().min(1).max(500),
+  title: z.string().min(1).max(200),
 });
 
-const updateSubtaskSchema = z.object({
-  title: z.string().min(1).max(500).optional(),
+export const updateSubtaskSchema = z.object({
+  title: z.string().min(1).max(200).optional(),
   done: z.boolean().optional(),
   position: z.number().int().min(0).optional(),
 }).refine(data => data.title !== undefined || data.done !== undefined || data.position !== undefined, {
   message: 'At least one field must be provided',
 });
 
-const createCommentSchema = z.object({
+export const createCommentSchema = z.object({
   id: z.string().uuid().optional(),
-  body: z.string().min(1).max(2000),
+  body: z.string().min(1).max(4000),
 });
 
 const createAttachmentSchema = z.object({
@@ -277,6 +277,7 @@ router.post(
           .select('user_id')
           .eq('workspace_id', req.params.workspaceId)
           .eq('user_id', assigneeId)
+          .is('deleted_at', null)
           .single();
 
         if (!member) {
@@ -485,6 +486,7 @@ router.patch(
             .select('user_id')
             .eq('workspace_id', currentTask.workspace_id)
             .eq('user_id', assigneeId)
+            .is('deleted_at', null)
             .maybeSingle();
           if (memberError) throw memberError;
           if (!member) {

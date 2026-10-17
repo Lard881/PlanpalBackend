@@ -3,22 +3,19 @@ import { z } from 'zod';
 import { userClient } from '../lib/supabase.js';
 import { loadWorkspace } from '../middleware/workspace.js';
 import { validate } from '../middleware/validate.js';
+import { AppError, ErrorCodes } from '../lib/errors.js';
+import { decodeSyncCursor, paginateSyncRows, prepareSyncQuery } from '../lib/sync-pagination.js';
 
 const router = express.Router({ mergeParams: true });
 
 const syncQuerySchema = z.object({
   since: z.string().datetime().optional(),
+  cursor: z.string().max(4096).optional(),
 });
 
 /**
  * GET /workspaces/:workspaceId/sync?since=<ISO time>
- * Delta sync — returns everything changed since a timestamp.
- * 2F fixes:
- *  - serverTime captured BEFORE queries (race-condition fix)
- *  - hasMore cutoff actually applied to response arrays
- *  - error checked on every query
- *  - inner join columns not included in response (select only child cols)
- *  - adds profiles and files to response
+ * Delta sync — returns changed rows, with a stable cursor for tie-safe paging.
  */
 router.get(
   '/',
@@ -28,8 +25,15 @@ router.get(
     try {
       const supabase = userClient(req.jwt);
       const workspaceId = req.params.workspaceId;
-      const since = req.query.since || new Date(0).toISOString();
-      const maxRows = parseInt(process.env.SYNC_MAX_ROWS || '1000', 10);
+      const cursor = decodeSyncCursor(req.query.cursor, workspaceId);
+      if (req.query.cursor && !cursor) {
+        throw new AppError(ErrorCodes.VALIDATION_FAILED, 'Invalid sync cursor', 400);
+      }
+      const since = cursor?.updatedAt || req.query.since || new Date(0).toISOString();
+      const configuredMaxRows = Number.parseInt(process.env.SYNC_MAX_ROWS || '1000', 10);
+      const maxRows = Number.isInteger(configuredMaxRows) && configuredMaxRows > 0
+        ? Math.min(configuredMaxRows, 1000)
+        : 1000;
 
       // 2F fix: capture serverTime BEFORE queries
       const serverTime = new Date().toISOString();
@@ -49,90 +53,102 @@ router.get(
         membersRes,
         filesRes,
       ] = await Promise.all([
-        supabase
-          .from('tasks')
-          .select('id,workspace_id,title,description,status,priority,due_at,assignee_id,label_id,created_by,completed_at,reminder_minutes_before,created_at,updated_at,deleted_at')
-          .eq('workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('tasks')
+            .select('id,workspace_id,title,description,status,priority,due_at,assignee_id,label_id,created_by,completed_at,reminder_minutes_before,created_at,updated_at,deleted_at')
+            .eq('workspace_id', workspaceId),
+          'tasks', since, cursor, maxRows,
+        ),
 
-        supabase
-          .from('subtasks')
-          .select('id,task_id,title,is_done,position,created_at,updated_at,deleted_at,tasks!inner(workspace_id)')
-          .eq('tasks.workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('subtasks')
+            .select('id,task_id,title,is_done,position,created_at,updated_at,deleted_at,tasks!inner(workspace_id)')
+            .eq('tasks.workspace_id', workspaceId),
+          'subtasks', since, cursor, maxRows,
+        ),
 
-        supabase
-          .from('task_comments')
-          .select('id,task_id,author_id,body,created_at,updated_at,deleted_at,tasks!inner(workspace_id)')
-          .eq('tasks.workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('task_comments')
+            .select('id,task_id,author_id,body,created_at,updated_at,deleted_at,tasks!inner(workspace_id)')
+            .eq('tasks.workspace_id', workspaceId),
+          'taskComments', since, cursor, maxRows,
+        ),
 
-        supabase
-          .from('task_attachments')
-          .select('task_id,file_id,created_at,updated_at,deleted_at,tasks!inner(workspace_id)')
-          .eq('tasks.workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('task_attachments')
+            .select('task_id,file_id,created_at,updated_at,deleted_at,tasks!inner(workspace_id)')
+            .eq('tasks.workspace_id', workspaceId),
+          'taskAttachments', since, cursor, maxRows,
+        ),
 
-        supabase
-          .from('labels')
-          .select('id,workspace_id,name,color,created_at,updated_at,deleted_at')
-          .eq('workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('labels')
+            .select('id,workspace_id,name,color,created_at,updated_at,deleted_at')
+            .eq('workspace_id', workspaceId),
+          'labels', since, cursor, maxRows,
+        ),
 
-        supabase
-          .from('events')
-          .select('id,workspace_id,title,description,starts_at,ends_at,all_day,color,task_id,reminder_minutes_before,created_by,created_at,updated_at,deleted_at')
-          .eq('workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('events')
+            .select('id,workspace_id,title,description,starts_at,ends_at,all_day,color,task_id,reminder_minutes_before,created_by,created_at,updated_at,deleted_at')
+            .eq('workspace_id', workspaceId),
+          'events', since, cursor, maxRows,
+        ),
 
-        supabase
-          .from('event_attendees')
-          .select('event_id,user_id,created_at,updated_at,deleted_at,events!inner(workspace_id)')
-          .eq('events.workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('event_attendees')
+            .select('event_id,user_id,created_at,updated_at,deleted_at,events!inner(workspace_id)')
+            .eq('events.workspace_id', workspaceId),
+          'eventAttendees', since, cursor, maxRows,
+        ),
 
-        supabase
-          .from('channels')
-          .select('id,workspace_id,kind,name,description,is_private,created_by,created_at,updated_at,deleted_at')
-          .eq('workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('channels')
+            .select('id,workspace_id,kind,name,description,is_private,created_by,created_at,updated_at,deleted_at')
+            .eq('workspace_id', workspaceId),
+          'channels', since, cursor, maxRows,
+        ),
 
-        supabase
-          .from('documents')
-          .select('id,workspace_id,folder_id,kind,title,file_id,content,content_text,created_by,created_at,updated_at,deleted_at')
-          .eq('workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('documents')
+            .select('id,workspace_id,folder_id,kind,title,file_id,content,content_text,created_by,created_at,updated_at,deleted_at')
+            .eq('workspace_id', workspaceId),
+          'documents', since, cursor, maxRows,
+        ),
 
-        supabase
-          .from('folders')
-          .select('id,workspace_id,parent_id,name,created_by,created_at,updated_at,deleted_at')
-          .eq('workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('folders')
+            .select('id,workspace_id,parent_id,name,created_by,created_at,updated_at,deleted_at')
+            .eq('workspace_id', workspaceId),
+          'folders', since, cursor, maxRows,
+        ),
 
-        supabase
-          .from('workspace_members')
-          .select('workspace_id,user_id,role,joined_at,updated_at')
-          .eq('workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('workspace_members')
+            .select('workspace_id,user_id,role,joined_at,updated_at,deleted_at')
+            .eq('workspace_id', workspaceId),
+          'members', since, cursor, maxRows,
+        ),
 
         // 2F addition: files for offline display
-        supabase
-          .from('files')
-          .select('id,workspace_id,name,mime_type,size_bytes,uploaded_by,storage_path,created_at,updated_at,deleted_at')
-          .eq('workspace_id', workspaceId)
-          .gte('updated_at', since)
-          .order('updated_at', { ascending: true }),
+        prepareSyncQuery(
+          supabase
+            .from('files')
+            .select('id,workspace_id,name,mime_type,size_bytes,uploaded_by,storage_path,created_at,updated_at,deleted_at')
+            .eq('workspace_id', workspaceId),
+          'files', since, cursor, maxRows,
+        ),
       ]);
 
       // 2F fix: check every query for errors
@@ -165,63 +181,31 @@ router.get(
           return clean;
         });
 
-      let tasks = tasksRes.data || [];
-      let subtasks = stripJoin(subtasksRes.data, 'tasks');
-      let taskComments = stripJoin(taskCommentsRes.data, 'tasks');
-      let taskAttachments = stripJoin(taskAttachmentsRes.data, 'tasks');
-      let labels = labelsRes.data || [];
-      let events = eventsRes.data || [];
-      let eventAttendees = stripJoin(eventAttendeesRes.data, 'events');
-      let channels = channelsRes.data || [];
-      let documents = documentsRes.data || [];
-      let folders = foldersRes.data || [];
-      let members = membersRes.data || [];
-      let files = filesRes.data || [];
-
-      // Calculate total rows
-      const allArrays = [
-        tasks, subtasks, taskComments, taskAttachments, labels,
-        events, eventAttendees, channels, documents, folders, members, files,
-      ];
-      const totalRows = allArrays.reduce((sum, arr) => sum + arr.length, 0);
-      const hasMore = totalRows > maxRows;
-
-      // R2.3 fix: apply the cutoff (was dead code before) and return correct serverTime
-      // When hasMore, serverTime = cutoff (largest updated_at among returned rows) so
-      // the app uses it as next `since` and misses no rows between cutoff and now.
-      let responseServerTime = serverTime;
-
-      if (hasMore) {
-        const allTimestamps = allArrays.flatMap(arr =>
-          arr.map(item => new Date(item.updated_at).getTime())
-        ).sort((a, b) => a - b);
-
-        const cutoffTs = allTimestamps[Math.min(maxRows - 1, allTimestamps.length - 1)];
-        const cutoffTime = new Date(cutoffTs).toISOString();
-
-        // R2.3 fix: return cutoff as serverTime when paging
-        responseServerTime = cutoffTime;
-
-        // R2.3 fix: compare as numbers (timestamps), not strings
-        const filterByCutoff = (arr) =>
-          arr.filter(item => new Date(item.updated_at).getTime() <= cutoffTs);
-
-        tasks = filterByCutoff(tasks);
-        subtasks = filterByCutoff(subtasks);
-        taskComments = filterByCutoff(taskComments);
-        taskAttachments = filterByCutoff(taskAttachments);
-        labels = filterByCutoff(labels);
-        events = filterByCutoff(events);
-        eventAttendees = filterByCutoff(eventAttendees);
-        channels = filterByCutoff(channels);
-        documents = filterByCutoff(documents);
-        folders = filterByCutoff(folders);
-        members = filterByCutoff(members);
-        files = filterByCutoff(files);
-      }
+      const rowSets = {
+        tasks: tasksRes.data || [],
+        subtasks: stripJoin(subtasksRes.data, 'tasks'),
+        taskComments: stripJoin(taskCommentsRes.data, 'tasks'),
+        taskAttachments: stripJoin(taskAttachmentsRes.data, 'tasks'),
+        labels: labelsRes.data || [],
+        events: eventsRes.data || [],
+        eventAttendees: stripJoin(eventAttendeesRes.data, 'events'),
+        channels: channelsRes.data || [],
+        documents: documentsRes.data || [],
+        folders: foldersRes.data || [],
+        members: membersRes.data || [],
+        files: filesRes.data || [],
+      };
+      const queryLimitReached = Object.values(rowSets).some(rows => rows.length >= maxRows);
+      const page = paginateSyncRows(rowSets, maxRows, cursor, workspaceId, queryLimitReached);
+      const {
+        tasks, subtasks, taskComments, taskAttachments, labels, events,
+        eventAttendees, channels, documents, folders, members, files,
+      } = page.rows;
 
       res.json({
-        serverTime: responseServerTime,
+        serverTime: page.hasMore && page.lastUpdatedAt
+          ? new Date(page.lastUpdatedAt).toISOString()
+          : serverTime,
         tasks,
         subtasks,
         taskComments,
@@ -235,7 +219,8 @@ router.get(
         members,
         profiles,
         files,
-        hasMore,
+        hasMore: page.hasMore,
+        nextCursor: page.nextCursor,
       });
     } catch (error) {
       next(error);

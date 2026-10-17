@@ -10,12 +10,12 @@ import { joinWorkspaceLimiter } from '../middleware/rateLimit.js';
 const router = express.Router();
 
 // Validation schemas
-const createWorkspaceSchema = z.object({
-  name: z.string().min(1).max(100),
+export const createWorkspaceSchema = z.object({
+  name: z.string().min(1).max(80),
 });
 
-const updateWorkspaceSchema = z.object({
-  name: z.string().min(1).max(100),
+export const updateWorkspaceSchema = z.object({
+  name: z.string().min(1).max(80),
 });
 
 const joinWorkspaceSchema = z.object({
@@ -54,6 +54,7 @@ router.get('/', async (req, res, next) => {
         )
       `)
       .eq('user_id', req.user.id)
+      .is('deleted_at', null)
       .is('workspaces.deleted_at', null)
       .order('created_at', { ascending: false, foreignTable: 'workspaces' });
     
@@ -132,7 +133,8 @@ router.get('/:workspaceId', loadWorkspace, async (req, res, next) => {
       supabase
         .from('workspace_members')
         .select('*', { count: 'exact', head: true })
-        .eq('workspace_id', req.params.workspaceId),
+        .eq('workspace_id', req.params.workspaceId)
+        .is('deleted_at', null),
       supabase
         .from('tasks')
         .select('*', { count: 'exact', head: true })
@@ -308,6 +310,7 @@ router.get('/:workspaceId/members', loadWorkspace, async (req, res, next) => {
         )
       `)
       .eq('workspace_id', req.params.workspaceId)
+      .is('deleted_at', null)
       .order('joined_at', { ascending: true });
     
     if (error) throw error;
@@ -346,6 +349,7 @@ router.patch(
         .update({ role })
         .eq('workspace_id', req.params.workspaceId)
         .eq('user_id', req.params.userId)
+        .is('deleted_at', null)
         .select()
         .single();
       
@@ -396,6 +400,7 @@ router.delete(
         .select('role')
         .eq('workspace_id', req.params.workspaceId)
         .eq('user_id', targetUserId)
+        .is('deleted_at', null)
         .single();
       
       if (targetMember && targetMember.role === 'admin') {
@@ -404,7 +409,8 @@ router.delete(
           .from('workspace_members')
           .select('*', { count: 'exact', head: true })
           .eq('workspace_id', req.params.workspaceId)
-          .eq('role', 'admin');
+          .eq('role', 'admin')
+          .is('deleted_at', null);
         
         if (adminCount <= 1) {
           throw new AppError(
@@ -417,9 +423,10 @@ router.delete(
       
       const { error } = await supabase
         .from('workspace_members')
-        .delete()
+        .update({ deleted_at: new Date().toISOString() })
         .eq('workspace_id', req.params.workspaceId)
-        .eq('user_id', targetUserId);
+        .eq('user_id', targetUserId)
+        .is('deleted_at', null);
       
       if (error) throw error;
       

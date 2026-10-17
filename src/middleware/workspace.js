@@ -21,6 +21,7 @@ export async function loadWorkspace(req, res, next) {
       .select('workspace_id, role, workspaces!inner(id, type)')
       .eq('workspace_id', workspaceId)
       .eq('user_id', req.user.id)
+      .is('deleted_at', null)
       .single();
     
     if (error || !membership) {

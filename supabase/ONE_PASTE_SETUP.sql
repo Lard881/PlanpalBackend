@@ -126,6 +126,7 @@ create table workspace_members (
   role member_role not null default 'member',
   joined_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
+  deleted_at timestamptz,
   primary key (workspace_id, user_id)
 );
 create index on workspace_members (user_id);
@@ -395,12 +396,13 @@ end $$;
 create or replace function is_member(ws uuid) returns boolean
 language sql stable security definer set search_path = public as $$
   select exists (select 1 from workspace_members
-                 where workspace_id = ws and user_id = auth.uid());
+                 where workspace_id = ws and user_id = auth.uid() and deleted_at is null);
 $$;
 
 create or replace function member_role_in(ws uuid) returns member_role
 language sql stable security definer set search_path = public as $$
-  select role from workspace_members where workspace_id = ws and user_id = auth.uid();
+  select role from workspace_members
+   where workspace_id = ws and user_id = auth.uid() and deleted_at is null;
 $$;
 
 create or replace function is_admin(ws uuid) returns boolean
@@ -420,7 +422,19 @@ $$;
 
 create or replace function is_channel_member(ch uuid) returns boolean
 language sql stable security definer set search_path = public as $$
-  select exists (select 1 from channel_members where channel_id = ch and user_id = auth.uid());
+  select exists (
+    select 1
+      from channel_members cm
+      join channels c on c.id = cm.channel_id
+     where cm.channel_id = ch
+       and cm.user_id = auth.uid()
+       and exists (
+         select 1 from workspace_members wm
+          where wm.workspace_id = c.workspace_id
+            and wm.user_id = auth.uid()
+            and wm.deleted_at is null
+       )
+  );
 $$;
 
 create or replace function channel_workspace(ch uuid) returns uuid
@@ -470,7 +484,8 @@ create policy profiles_select on profiles for select using (
   id = auth.uid() or exists (
     select 1 from workspace_members a join workspace_members b
       on a.workspace_id = b.workspace_id
-    where a.user_id = auth.uid() and b.user_id = profiles.id)
+    where a.user_id = auth.uid() and a.deleted_at is null
+      and b.user_id = profiles.id and b.deleted_at is null)
 );
 create policy profiles_update on profiles for update
   using (id = auth.uid()) with check (id = auth.uid());
@@ -489,12 +504,11 @@ create policy wm_select on workspace_members for select using (
     is_full_member(workspace_id) or user_id = auth.uid() or role = 'admin')
 );
 create policy wm_update on workspace_members for update
-  using (is_admin(workspace_id) and not is_personal(workspace_id))
+  using (is_admin(workspace_id) and not is_personal(workspace_id) and deleted_at is null)
   with check (is_admin(workspace_id));
-create policy wm_delete on workspace_members for delete using (
-  (is_admin(workspace_id) and not is_personal(workspace_id))
-  or (user_id = auth.uid() and not is_personal(workspace_id))
-);
+create policy wm_leave on workspace_members for update
+  using (user_id = auth.uid() and not is_personal(workspace_id) and deleted_at is null)
+  with check (user_id = auth.uid() and not is_personal(workspace_id) and deleted_at is not null);
 
 -- invite_codes: admins only, team workspaces only
 create policy ic_all on invite_codes for all
@@ -588,23 +602,62 @@ create policy attach_write on task_attachments for all using (
 );
 
 -- events
+create or replace function event_workspace(p_event_id uuid) returns uuid
+language sql stable security definer
+set search_path = public
+set row_security = off as $$
+  select workspace_id
+    from events
+   where id = p_event_id
+     and (
+       is_full_member(workspace_id)
+       or exists (
+         select 1
+           from event_attendees ea
+          where ea.event_id = p_event_id
+            and ea.user_id = auth.uid()
+            and ea.deleted_at is null
+            and is_member(events.workspace_id)
+       )
+     );
+$$;
+
+create or replace function is_event_attendee(p_event_id uuid) returns boolean
+language sql stable security definer
+set search_path = public
+set row_security = off as $$
+  select exists (
+    select 1
+      from event_attendees ea
+      join events e on e.id = ea.event_id
+     where ea.event_id = p_event_id
+       and ea.user_id = auth.uid()
+       and ea.deleted_at is null
+       and is_member(e.workspace_id)
+  );
+$$;
+
+revoke all on function event_workspace(uuid) from public, anon;
+revoke all on function is_event_attendee(uuid) from public, anon;
+grant execute on function event_workspace(uuid) to authenticated;
+grant execute on function is_event_attendee(uuid) to authenticated;
+alter function public.event_workspace(uuid) owner to postgres;
+alter function public.is_event_attendee(uuid) owner to postgres;
+
 create policy events_select on events for select using (
-  is_full_member(workspace_id)
-  or exists (select 1 from event_attendees ea
-             where ea.event_id = events.id and ea.user_id = auth.uid() and ea.deleted_at is null)
+  is_full_member(workspace_id) or is_event_attendee(id)
 );
 create policy events_write on events for all
   using (is_full_member(workspace_id)) with check (is_full_member(workspace_id));
 
 -- event_attendees
 create policy attendees_select on event_attendees for select using (
-  exists (select 1 from events e where e.id = event_attendees.event_id));
+  user_id = auth.uid() or is_full_member(event_workspace(event_id))
+);
 create policy attendees_write on event_attendees for all using (
-  exists (select 1 from events e where e.id = event_attendees.event_id
-          and is_full_member(e.workspace_id))
+  is_full_member(event_workspace(event_id))
 ) with check (
-  exists (select 1 from events e where e.id = event_attendees.event_id
-          and is_full_member(e.workspace_id))
+  is_full_member(event_workspace(event_id))
 );
 
 -- channels and chat (team workspaces only)
@@ -708,8 +761,14 @@ create trigger on_workspace_created after insert on workspaces
 -- 6.3 Someone joins a team: add them to #general (guests are not auto-added)
 create or replace function handle_member_joined() returns trigger
 language plpgsql security definer set search_path = public as $$
+declare should_add_to_general boolean;
 begin
-  if new.role in ('admin','member') then
+  if tg_op = 'INSERT' then
+    should_add_to_general := true;
+  else
+    should_add_to_general := old.deleted_at is not null or old.role is distinct from new.role;
+  end if;
+  if new.deleted_at is null and new.role in ('admin','member') and should_add_to_general then
     insert into channel_members (channel_id, user_id)
     select c.id, new.user_id from channels c
     where c.workspace_id = new.workspace_id and c.kind = 'channel' and c.name = 'general'
@@ -717,7 +776,7 @@ begin
   end if;
   return new;
 end $$;
-create trigger on_member_joined after insert on workspace_members
+create trigger on_member_joined after insert or update of role, deleted_at on workspace_members
   for each row execute function handle_member_joined();
 
 -- 6.4 Never remove or demote the last admin of a team
@@ -725,10 +784,12 @@ create or replace function protect_last_admin() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare remaining int;
 begin
-  if (tg_op = 'DELETE' and old.role = 'admin')
-     or (tg_op = 'UPDATE' and old.role = 'admin' and new.role <> 'admin') then
+  if (tg_op = 'DELETE' and old.role = 'admin' and old.deleted_at is null)
+     or (tg_op = 'UPDATE' and old.deleted_at is null and old.role = 'admin'
+         and (new.role <> 'admin' or new.deleted_at is not null)) then
     select count(*) into remaining from workspace_members
-      where workspace_id = old.workspace_id and role = 'admin' and user_id <> old.user_id;
+      where workspace_id = old.workspace_id and role = 'admin'
+        and user_id <> old.user_id and deleted_at is null;
     if remaining = 0 and exists (select 1 from workspaces w where w.id = old.workspace_id
                                  and w.type = 'team' and w.deleted_at is null) then
       raise exception 'a team workspace must keep at least one admin' using errcode = 'P0001';
@@ -753,11 +814,14 @@ begin
   if ic.max_uses is not null and ic.use_count >= ic.max_uses then
     raise exception 'CODE_USED_UP' using errcode = 'P0002'; end if;
   if exists (select 1 from workspace_members
-             where workspace_id = ic.workspace_id and user_id = auth.uid()) then
+             where workspace_id = ic.workspace_id and user_id = auth.uid()
+               and deleted_at is null) then
     raise exception 'ALREADY_MEMBER' using errcode = 'P0002'; end if;
 
   insert into workspace_members (workspace_id, user_id, role)
-  values (ic.workspace_id, auth.uid(), ic.role);
+  values (ic.workspace_id, auth.uid(), ic.role)
+  on conflict (workspace_id, user_id) do update
+    set role = excluded.role, joined_at = now(), deleted_at = null;
   update invite_codes set use_count = use_count + 1 where id = ic.id;
   return ic.workspace_id;
 end $$;
@@ -772,7 +836,8 @@ begin
   if not (t.created_by = auth.uid() or is_admin(t.workspace_id)) then
     raise exception 'not allowed' using errcode = '42501'; end if;
   if not exists (select 1 from workspace_members where workspace_id = p_target
-                 and user_id = auth.uid() and role in ('admin','member')) then
+                 and user_id = auth.uid() and role in ('admin','member')
+                 and deleted_at is null) then
     raise exception 'not a member of the target workspace' using errcode = '42501'; end if;
 
   perform set_config('planpal.moving', '1', true);
@@ -780,7 +845,8 @@ begin
     workspace_id = p_target,
     label_id = null,
     assignee_id = case when exists (select 1 from workspace_members
-        where workspace_id = p_target and user_id = t.assignee_id) then t.assignee_id else null end
+        where workspace_id = p_target and user_id = t.assignee_id
+          and deleted_at is null) then t.assignee_id else null end
   where id = p_task;
   update files set workspace_id = p_target
   where id in (select file_id from task_attachments where task_id = p_task);
@@ -792,7 +858,8 @@ language plpgsql security definer set search_path = public as $$
 declare ch uuid;
 begin
   if not (is_full_member(p_workspace) and exists (select 1 from workspace_members
-      where workspace_id = p_workspace and user_id = p_other and role in ('admin','member'))) then
+      where workspace_id = p_workspace and user_id = p_other
+        and role in ('admin','member') and deleted_at is null)) then
     raise exception 'both people must be members of this workspace' using errcode = '42501';
   end if;
   select c.id into ch from channels c
@@ -841,6 +908,7 @@ language sql stable security invoker set search_path = public as $$
     from profiles p
     join workspace_members wm on wm.user_id = p.id, q
    where p.deleted_at is null
+     and wm.deleted_at is null
      and (p_workspace is null or wm.workspace_id = p_workspace)
      and (p.full_name ilike '%' || q.raw || '%' or p.email ilike '%' || q.raw || '%')
   order by 6 desc

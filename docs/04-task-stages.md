@@ -6,6 +6,8 @@
 
 Legend: `[ ]` to do, `[~]` in progress, `[x]` done. Change the marker in place and update the progress table.
 
+**Tracker truth:** the current `0 / total` counts mean that no task is recorded here as verified. They do not mean the repository contains no implementation; existing code or passing partial tests do not complete a task until its requirements and stage definition of done are verified. All unchecked work—including deployment, fresh-project migrations, end-to-end behavior and release checks—remains unverified.
+
 ---
 
 ## Progress table

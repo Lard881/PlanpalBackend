@@ -15,13 +15,13 @@ const listDocsQuerySchema = z.object({
   recent: z.coerce.boolean().optional(),
 });
 
-const createFolderSchema = z.object({
-  name: z.string().min(1).max(200),
+export const createFolderSchema = z.object({
+  name: z.string().min(1).max(80),
   parentId: z.string().uuid().optional().nullable(),
 });
 
-const updateFolderSchema = z.object({
-  name: z.string().min(1).max(200).optional(),
+export const updateFolderSchema = z.object({
+  name: z.string().min(1).max(80).optional(),
   parentId: z.string().uuid().optional().nullable(),
 });
 

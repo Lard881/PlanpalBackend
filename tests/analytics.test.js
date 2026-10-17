@@ -30,6 +30,7 @@ logSkip('Analytics tests');
   let adminId, memberId, guestId;
   let workspaceId;
   let workLabelId, personalLabelId;
+  let fixtureToday;
 
   beforeAll(async () => {
     app = createApp();
@@ -109,8 +110,8 @@ logSkip('Analytics tests');
     personalLabelId = labels.find(label => label.name === 'personal').id;
 
     // Create fixture data with known values
-    const now = new Date();
-    now.setUTCHours(12, 0, 0, 0);
+    const now = new Date(Date.now() - 60 * 1000);
+    fixtureToday = now.toISOString().slice(0, 10);
     const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000);
     const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
@@ -323,9 +324,8 @@ logSkip('Analytics tests');
       expect(Array.isArray(daily)).toBe(true);
       expect(daily.length).toBeGreaterThan(0);
 
-      // Find today's entry
-      const today = new Date().toISOString().split('T')[0];
-      const todayEntry = daily.find(d => d.date === today);
+      // Match the UTC day used when creating the recent, relative-time fixtures.
+      const todayEntry = daily.find(d => d.date === fixtureToday);
 
       if (todayEntry) {
         // Expected: 3 completed today

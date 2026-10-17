@@ -174,6 +174,7 @@ router.post('/channels', loadWorkspace, validate(createChannelSchema), async (re
         .from('workspace_members')
         .select('user_id')
         .eq('workspace_id', req.params.workspaceId)
+        .is('deleted_at', null)
         .in('user_id', requestedMembers);
       if (workspaceMemberError) throw workspaceMemberError;
       const allowedIds = new Set((workspaceMembers || []).map(member => member.user_id));

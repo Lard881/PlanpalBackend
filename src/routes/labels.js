@@ -7,14 +7,14 @@ import { validate } from '../middleware/validate.js';
 const router = express.Router({ mergeParams: true }); // mergeParams for :workspaceId from parent
 
 // Validation schemas
-const createLabelSchema = z.object({
+export const createLabelSchema = z.object({
   id: z.string().uuid().optional(), // Client-supplied ID for idempotency
-  name: z.string().min(1).max(50),
+  name: z.string().min(1).max(40),
   color: z.string().regex(/^#[0-9A-Fa-f]{6}$/),
 });
 
-const updateLabelSchema = z.object({
-  name: z.string().min(1).max(50).optional(),
+export const updateLabelSchema = z.object({
+  name: z.string().min(1).max(40).optional(),
   color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
 }).refine(data => data.name || data.color, {
   message: 'At least one of name or color must be provided',

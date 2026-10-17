@@ -19,7 +19,7 @@ const eventsQuerySchema = z.object({
   return diffDays >= 0 && diffDays <= 62;
 }, { message: 'Date range cannot exceed 62 days' });
 
-const createEventSchema = z.object({
+export const createEventSchema = z.object({
   id: z.string().uuid().optional(),
   title: z.string().min(1).max(200),
   startsAt: z.string().datetime(),
@@ -30,8 +30,8 @@ const createEventSchema = z.object({
   attendeeIds: z.array(z.string().uuid()).optional(),
   reminderMinutesBefore: z.number().int().min(0).optional(),
 }).refine(
-  data => new Date(data.endsAt) > new Date(data.startsAt),
-  { message: 'Event end must be after its start', path: ['endsAt'] },
+  data => new Date(data.endsAt) >= new Date(data.startsAt),
+  { message: 'Event end cannot be before its start', path: ['endsAt'] },
 );
 
 const updateEventSchema = z.object({
@@ -160,6 +160,7 @@ router.post(
           .from('workspace_members')
           .select('user_id')
           .eq('workspace_id', req.params.workspaceId)
+          .is('deleted_at', null)
           .in('user_id', attendeeIds);
         if (membersError) throw membersError;
         const memberIds = new Set((members || []).map(member => member.user_id));
@@ -237,6 +238,7 @@ itemRouter.patch('/events/:eventId', validate(updateEventSchema), async (req, re
         .from('workspace_members')
         .select('user_id')
         .eq('workspace_id', event.workspace_id)
+        .is('deleted_at', null)
         .in('user_id', attendeeIds);
       if (membersError) throw membersError;
       const memberIds = new Set((members || []).map(member => member.user_id));

@@ -7,12 +7,12 @@ const envSchema = z.object({
   PORT: z.string().default('3000'),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   
-  SUPABASE_URL: z.string().url(),
-  SUPABASE_ANON_KEY: z.string().min(1),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  SUPABASE_URL: z.string().url().optional(),
+  SUPABASE_ANON_KEY: z.string().min(1).optional(),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
   SUPABASE_JWT_SECRET: z.string().optional(),
   
-  // Test database credentials (optional, used when NODE_ENV=test)
+  // Test credentials are mandatory in test mode; production credentials are never a fallback.
   TEST_SUPABASE_URL: z.string().url().optional(),
   TEST_SUPABASE_ANON_KEY: z.string().min(1).optional(),
   TEST_SUPABASE_SERVICE_KEY: z.string().min(1).optional(),
@@ -22,6 +22,20 @@ const envSchema = z.object({
   CRON_SECRET: z.string().optional(),
   
   ALLOWED_ORIGINS: z.string().default('http://localhost:3000'),
+}).superRefine((value, ctx) => {
+  const requiredKeys = value.NODE_ENV === 'test'
+    ? ['TEST_SUPABASE_URL', 'TEST_SUPABASE_ANON_KEY', 'TEST_SUPABASE_SERVICE_KEY']
+    : ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY'];
+
+  for (const key of requiredKeys) {
+    if (!value[key]) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `${key} is required`,
+      });
+    }
+  }
 });
 
 let env;
@@ -42,18 +56,13 @@ export const config = {
   isTest: env.NODE_ENV === 'test',
   
   supabase: {
-    // Use TEST credentials when NODE_ENV=test, otherwise use production
-    url: env.NODE_ENV === 'test' && env.TEST_SUPABASE_URL 
-      ? env.TEST_SUPABASE_URL 
-      : env.SUPABASE_URL,
-    anonKey: env.NODE_ENV === 'test' && env.TEST_SUPABASE_ANON_KEY 
-      ? env.TEST_SUPABASE_ANON_KEY 
-      : env.SUPABASE_ANON_KEY,
-    serviceRoleKey: env.NODE_ENV === 'test' && env.TEST_SUPABASE_SERVICE_KEY 
-      ? env.TEST_SUPABASE_SERVICE_KEY 
+    url: env.NODE_ENV === 'test' ? env.TEST_SUPABASE_URL : env.SUPABASE_URL,
+    anonKey: env.NODE_ENV === 'test' ? env.TEST_SUPABASE_ANON_KEY : env.SUPABASE_ANON_KEY,
+    serviceRoleKey: env.NODE_ENV === 'test'
+      ? env.TEST_SUPABASE_SERVICE_KEY
       : env.SUPABASE_SERVICE_ROLE_KEY,
-    jwtSecret: env.NODE_ENV === 'test' && env.TEST_SUPABASE_JWT_SECRET 
-      ? env.TEST_SUPABASE_JWT_SECRET 
+    jwtSecret: env.NODE_ENV === 'test'
+      ? env.TEST_SUPABASE_JWT_SECRET
       : env.SUPABASE_JWT_SECRET,
   },
   

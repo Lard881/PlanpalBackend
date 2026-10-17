@@ -32,7 +32,8 @@ router.get('/', async (req, res, next) => {
         role,
         workspaces!inner(id, name, type)
       `)
-      .eq('user_id', req.user.id);
+      .eq('user_id', req.user.id)
+      .is('deleted_at', null);
     
     if (membershipsError) throw membershipsError;
     
@@ -211,7 +212,8 @@ router.delete('/', validate(deleteAccountSchema), async (req, res, next) => {
     const { data: memberships } = await supabase
       .from('workspace_members')
       .select('workspace_id, role, workspaces!inner(id, type)')
-      .eq('user_id', req.user.id);
+      .eq('user_id', req.user.id)
+      .is('deleted_at', null);
     
     for (const membership of memberships || []) {
       if (membership.role === 'admin' && membership.workspaces.type === 'team') {
@@ -220,13 +222,15 @@ router.delete('/', validate(deleteAccountSchema), async (req, res, next) => {
           .from('workspace_members')
           .select('user_id')
           .eq('workspace_id', membership.workspace_id)
-          .eq('role', 'admin');
+          .eq('role', 'admin')
+          .is('deleted_at', null);
         
         // Count total members
         const { count: totalMembers } = await supabase
           .from('workspace_members')
           .select('*', { count: 'exact', head: true })
-          .eq('workspace_id', membership.workspace_id);
+          .eq('workspace_id', membership.workspace_id)
+          .is('deleted_at', null);
         
         if (admins.length === 1 && totalMembers > 1) {
           throw new AppError(
@@ -250,8 +254,9 @@ router.delete('/', validate(deleteAccountSchema), async (req, res, next) => {
     // Remove from team workspaces
     await supabase
       .from('workspace_members')
-      .delete()
+      .update({ deleted_at: new Date().toISOString() })
       .eq('user_id', req.user.id)
+      .is('deleted_at', null)
       .neq('workspace_id', personalWorkspace?.workspace_id);
     
     // Delete personal workspace and its files
