@@ -637,7 +637,7 @@ Max size: 25 MB. Allowed types: common document, image, video and audio types.
 
 ## POST /workspaces/:workspaceId/folders
 
-**Request body** `{ "name": "Design Assets", "parentId": null }`
+**Request body** `{ "id": "uuid (optional client-generated ID)", "name": "Design Assets", "parentId": null }`
 
 **Response 201** `{ "folder": { ... } }`
 
@@ -653,7 +653,7 @@ Max size: 25 MB. Allowed types: common document, image, video and audio types.
 
 ## DELETE /folders/:folderId
 
-Only if empty.
+Only if it contains no active documents or child folders.
 
 **Response 204** No content.
 

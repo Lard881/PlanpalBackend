@@ -158,6 +158,7 @@ Plain-language idea: the app keeps a local copy of your data on the device (like
 | Add comments | Works, queued |
 | Create and edit calendar events | Works, queued |
 | Write in-app documents | Works, queued |
+| Create, rename, move, delete folders; rename, move, delete cached documents | Works, queued |
 | Chat: read old messages | Works from cache |
 | Chat: send a message | Queued and shown as "sending", sent when back online |
 | Chat: receive new messages, online status | Online only |

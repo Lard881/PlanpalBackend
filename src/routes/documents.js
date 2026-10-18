@@ -16,6 +16,7 @@ const listDocsQuerySchema = z.object({
 });
 
 export const createFolderSchema = z.object({
+  id: z.string().uuid().optional(),
   name: z.string().min(1).max(80),
   parentId: z.string().uuid().optional().nullable(),
 });
@@ -93,12 +94,13 @@ router.get('/folders', loadWorkspace, validate(listDocsQuerySchema, 'query'), as
  */
 router.post('/folders', loadWorkspace, validate(createFolderSchema), async (req, res, next) => {
   try {
-    const { name, parentId } = req.body;
+    const { id, name, parentId } = req.body;
     const supabase = userClient(req.jwt);
 
     const { data: folder, error } = await supabase
       .from('folders')
       .insert({
+        ...(id ? { id } : {}),
         workspace_id: req.params.workspaceId,
         name,
         parent_id: parentId,
@@ -157,7 +159,15 @@ itemRouter.delete('/folders/:folderId', async (req, res, next) => {
       .eq('folder_id', req.params.folderId)
       .is('deleted_at', null);
 
-    if (count > 0) {
+    const { count: childFolderCount, error: childFolderError } = await supabase
+      .from('folders')
+      .select('*', { count: 'exact', head: true })
+      .eq('parent_id', req.params.folderId)
+      .is('deleted_at', null);
+
+    if (childFolderError) throw childFolderError;
+
+    if (count > 0 || childFolderCount > 0) {
       throw new AppError(
         ErrorCodes.FOLDER_NOT_EMPTY,
         'Folder must be empty before deletion',

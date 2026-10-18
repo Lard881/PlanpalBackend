@@ -263,8 +263,8 @@ Image previews in chat: the app asks for a download URL per image and caches it.
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/workspaces/:workspaceId/folders?parentId=` | Each folder includes `fileCount`. |
-| POST | `/workspaces/:workspaceId/folders` | `{ name, parentId? }` |
-| PATCH / DELETE | `/folders/:folderId` | Rename or move; delete only if empty (or delete everything inside, as the owner prefers later; first release: only when empty, respond `409 FOLDER_NOT_EMPTY`). |
+| POST | `/workspaces/:workspaceId/folders` | `{ id?, name, parentId? }`; an optional client ID supports queued offline creation. |
+| PATCH / DELETE | `/folders/:folderId` | Rename or move; delete only if there are no active documents or child folders; otherwise respond `409 FOLDER_NOT_EMPTY`. |
 | GET | `/workspaces/:workspaceId/documents?folderId=&kind=&recent=true` | List. `recent=true` returns latest 12. |
 | POST | `/workspaces/:workspaceId/documents` | Two shapes. **File:** `{ kind: 'file', title, fileId, folderId? }`. **Written:** `{ kind: 'written', title, content (Quill delta JSON), contentText, folderId? }`. |
 | GET | `/documents/:documentId` | Full document. Written documents include `content`. |
