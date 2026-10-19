@@ -51,6 +51,37 @@ const updateDocumentSchema = z.object({
   contentText: z.string().optional(),
 });
 
+export async function softDeleteDocument(supabase, documentId) {
+  const { data: deletedDocument, error } = await supabase
+    .from('documents')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', documentId)
+    .is('deleted_at', null)
+    .select('id')
+    .maybeSingle();
+
+  if (error) throw error;
+  if (deletedDocument) return;
+
+  const { data: existingDocument, error: lookupError } = await supabase
+    .from('documents')
+    .select('id, deleted_at')
+    .eq('id', documentId)
+    .maybeSingle();
+
+  if (lookupError) throw lookupError;
+  if (!existingDocument) {
+    throw new AppError(ErrorCodes.NOT_FOUND, 'Document not found', 404);
+  }
+  if (existingDocument.deleted_at === null) {
+    throw new AppError(
+      ErrorCodes.FORBIDDEN,
+      'You do not have permission to delete this document',
+      403
+    );
+  }
+}
+
 /**
  * GET /workspaces/:workspaceId/folders?parentId=
  * List folders
@@ -348,15 +379,7 @@ itemRouter.patch('/documents/:documentId', validate(updateDocumentSchema), async
 itemRouter.delete('/documents/:documentId', async (req, res, next) => {
   try {
     const supabase = userClient(req.jwt);
-
-    const { error } = await supabase
-      .from('documents')
-      .update({ deleted_at: new Date().toISOString() })
-      .eq('id', req.params.documentId)
-      .is('deleted_at', null);
-
-    if (error) throw error;
-
+    await softDeleteDocument(supabase, req.params.documentId);
     res.status(204).send();
   } catch (error) {
     next(error);
