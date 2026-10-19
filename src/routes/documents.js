@@ -15,6 +15,10 @@ const listDocsQuerySchema = z.object({
   recent: z.coerce.boolean().optional(),
 });
 
+export const listFoldersQuerySchema = z.object({
+  parentId: z.string().uuid().optional(),
+});
+
 export const createFolderSchema = z.object({
   id: z.string().uuid().optional(),
   name: z.string().min(1).max(80),
@@ -51,7 +55,7 @@ const updateDocumentSchema = z.object({
  * GET /workspaces/:workspaceId/folders?parentId=
  * List folders
  */
-router.get('/folders', loadWorkspace, validate(listDocsQuerySchema, 'query'), async (req, res, next) => {
+router.get('/folders', loadWorkspace, validate(listFoldersQuerySchema, 'query'), async (req, res, next) => {
   try {
     const { parentId } = req.query;
     const supabase = userClient(req.jwt);
@@ -133,6 +137,7 @@ itemRouter.patch('/folders/:folderId', validate(updateFolderSchema), async (req,
       .from('folders')
       .update(update)
       .eq('id', req.params.folderId)
+      .is('deleted_at', null)
       .select()
       .single();
 
@@ -178,7 +183,8 @@ itemRouter.delete('/folders/:folderId', async (req, res, next) => {
     const { error } = await supabase
       .from('folders')
       .update({ deleted_at: new Date().toISOString() })
-      .eq('id', req.params.folderId);
+      .eq('id', req.params.folderId)
+      .is('deleted_at', null);
 
     if (error) throw error;
 
@@ -200,7 +206,7 @@ router.get('/documents', loadWorkspace, validate(listDocsQuerySchema, 'query'), 
     let query = supabase
       .from('documents')
       .select(
-        'id, workspace_id, created_by, kind, title, folder_id, file_id, created_at, updated_at',
+        'id, workspace_id, created_by, kind, title, folder_id, file_id, created_at, updated_at, file:files!documents_file_id_fkey(id, name, mime_type, size_bytes, storage_path)',
       )
       .eq('workspace_id', req.params.workspaceId)
       .is('deleted_at', null);
@@ -292,8 +298,9 @@ itemRouter.get('/documents/:documentId', async (req, res, next) => {
 
     const { data: document, error } = await supabase
       .from('documents')
-      .select('*')
+      .select('*, file:files!documents_file_id_fkey(id, name, mime_type, size_bytes, storage_path)')
       .eq('id', req.params.documentId)
+      .is('deleted_at', null)
       .single();
 
     if (error) throw error;
@@ -322,6 +329,7 @@ itemRouter.patch('/documents/:documentId', validate(updateDocumentSchema), async
       .from('documents')
       .update(update)
       .eq('id', req.params.documentId)
+      .is('deleted_at', null)
       .select()
       .single();
 
@@ -344,7 +352,8 @@ itemRouter.delete('/documents/:documentId', async (req, res, next) => {
     const { error } = await supabase
       .from('documents')
       .update({ deleted_at: new Date().toISOString() })
-      .eq('id', req.params.documentId);
+      .eq('id', req.params.documentId)
+      .is('deleted_at', null);
 
     if (error) throw error;
 

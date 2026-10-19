@@ -1,6 +1,9 @@
 import { describe, expect, it } from '@jest/globals';
 import { randomUUID } from 'node:crypto';
-import { createFolderSchema } from '../src/routes/documents.js';
+import {
+  createFolderSchema,
+  listFoldersQuerySchema,
+} from '../src/routes/documents.js';
 
 describe('Documents folder create schema', () => {
   it('accepts a client-generated folder ID for offline synchronization', () => {
@@ -19,5 +22,13 @@ describe('Documents folder create schema', () => {
 
     expect(result.success).toBe(true);
     expect(result.data.id).toBeUndefined();
+  });
+
+  it('accepts a parent ID when listing folders inside a folder', () => {
+    const parentId = randomUUID();
+    const result = listFoldersQuerySchema.safeParse({ parentId });
+
+    expect(result.success).toBe(true);
+    expect(result.data.parentId).toBe(parentId);
   });
 });
